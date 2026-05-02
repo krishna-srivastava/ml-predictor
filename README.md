@@ -83,15 +83,9 @@ pyarrow
 ---
 
 ## Why Not Deployed?
-
 MLPredictor is intentionally kept as a local app.
-
 Free cloud platforms (like Streamlit Cloud) have limited RAM and CPU — 
 loading large CSVs and training ML models like Random Forest in real time 
 would be extremely slow or crash entirely.
-
 Running it locally gives you full system resources and the best experience.
 Simply clone the repo and run it yourself in under a minute.
-
-
-Made with 🖤 using Streamlit
