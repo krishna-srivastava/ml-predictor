@@ -4,7 +4,7 @@
 
 MLPredictor is a no-code machine learning web app built with Streamlit that takes you from raw data to a trained, downloadable ML model — all in one place, no coding required.
 
-![App Screenshot](screenshot.png)
+![App Screenshot](Screenshot.png)
 
 ---
 
