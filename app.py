@@ -871,60 +871,158 @@ if file is not None:
         if not has_error:
             # -------- Convert bool to int --------
             df = df.replace({True: 1, False: 0})
-    
+
             # -------- Select Target --------
             st.markdown("### Select Target Column")
             target = st.selectbox("Target (Y)", df.columns, key="train_target")
-    
+
             X = df.drop(columns=[target])
             y = df[target]
-    
+
             # -------- Detect Task --------
             task_type = "Classification" if (y.dtype == object or y.nunique() <= 15) else "Regression"
             st.info(f"Detected Task: **{task_type}** &nbsp;|&nbsp; Features: **{X.shape[1]}** &nbsp;|&nbsp; Rows: **{len(X):,}**")
-    
-            # -------- Sampling / PCA warnings OUTSIDE spinner --------
+
+            # -------- Warnings OUTSIDE spinner --------
             MAX_ROWS = 20000
             if len(X) > MAX_ROWS:
                 st.warning(f"⚡ Large dataset detected ({len(X):,} rows). Training will use {MAX_ROWS:,} random samples.")
-    
+
             if X.shape[1] > 100:
                 st.warning(f"🧬 High dimensions detected ({X.shape[1]} features). PCA will auto-apply (90% variance).")
-    
+
             # -------- Model Selection --------
             st.markdown("### Select Model")
             if task_type == "Regression":
                 model_list = ["Linear Regression", "KNN", "SVM", "Decision Tree", "Random Forest"]
             else:
                 model_list = ["Logistic Regression", "KNN", "SVM", "Decision Tree", "Random Forest"]
-    
+
             model_name = st.selectbox("Model", model_list, key="model_select")
-    
+
+            # ════════════════════════════════════════
+            # HYPERPARAMETER TUNING
+            # ════════════════════════════════════════
+            hyper_models = ["Decision Tree", "Random Forest", "SVM"]
+            hp = {}  # hyperparams dict
+
+            if model_name in hyper_models:
+                enable_tuning = st.toggle(
+                    "⚙ Enable Hyperparameter Tuning",
+                    value=False,
+                    key="hp_toggle"
+                )
+
+                if enable_tuning:
+                    st.markdown("#### Hyperparameters")
+
+                    if model_name == "Decision Tree":
+                        c1, c2, c3 = st.columns(3)
+                        hp["max_depth"] = c1.slider(
+                            "Max Depth",
+                            min_value=1, max_value=20, value=5,
+                            help="Depth of tree — higher = more complex, risk of overfitting"
+                        )
+                        hp["min_samples_split"] = c2.slider(
+                            "Min Samples Split",
+                            min_value=2, max_value=20, value=5,
+                            help="Min samples needed to split a node"
+                        )
+                        hp["min_samples_leaf"] = c3.slider(
+                            "Min Samples Leaf",
+                            min_value=1, max_value=20, value=2,
+                            help="Min samples needed at a leaf node"
+                        )
+                        st.caption(
+                            "💡 **Tip:** `Max Depth` 3–8 is usually best. "
+                            "Too high → overfitting. Too low → underfitting."
+                        )
+
+                    elif model_name == "Random Forest":
+                        c1, c2, c3, c4 = st.columns(4)
+                        hp["n_estimators"] = c1.slider(
+                            "N Estimators",
+                            min_value=50, max_value=500, value=150, step=50,
+                            help="Number of trees — more = better but slower"
+                        )
+                        hp["max_depth"] = c2.slider(
+                            "Max Depth",
+                            min_value=1, max_value=20, value=7,
+                            help="Max depth of each tree"
+                        )
+                        hp["min_samples_split"] = c3.slider(
+                            "Min Samples Split",
+                            min_value=2, max_value=20, value=5,
+                            help="Min samples to split a node"
+                        )
+                        hp["min_samples_leaf"] = c4.slider(
+                            "Min Samples Leaf",
+                            min_value=1, max_value=20, value=2,
+                            help="Min samples at leaf node"
+                        )
+                        st.caption(
+                            "💡 **Tip:** Start with 100–200 trees. "
+                            "`Max Depth` 5–10 works well for most datasets."
+                        )
+
+                    elif model_name == "SVM":
+                        c1, c2, c3 = st.columns(3)
+                        hp["C"] = c1.select_slider(
+                            "C (Regularization)",
+                            options=[0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0],
+                            value=1.0,
+                            help="Higher C = less regularization, fits training data more"
+                        )
+                        hp["kernel"] = c2.selectbox(
+                            "Kernel",
+                            ["rbf", "linear", "poly", "sigmoid"],
+                            help="rbf works best for most cases"
+                        )
+                        hp["gamma"] = c3.selectbox(
+                            "Gamma",
+                            ["scale", "auto"],
+                            help="scale = 1/(n_features * X.var()) — usually better"
+                        )
+                        st.caption(
+                            "💡 **Tip:** `rbf` kernel with `C=1.0` is a safe start. "
+                            "Increase `C` if underfitting, decrease if overfitting."
+                        )
+                else:
+                    # default params
+                    if model_name == "Decision Tree":
+                        hp = {"max_depth": 5, "min_samples_split": 5, "min_samples_leaf": 2}
+                    elif model_name == "Random Forest":
+                        hp = {"n_estimators": 150, "max_depth": 7,
+                              "min_samples_split": 5, "min_samples_leaf": 2}
+                    elif model_name == "SVM":
+                        hp = {"C": 1.0, "kernel": "rbf", "gamma": "scale"}
+
             # -------- Train Button --------
             if st.button("🚀 Train Model", key="train_btn"):
+
                 X_sample = X.copy()
                 y_sample = y.copy()
-    
+
                 if len(X_sample) > MAX_ROWS:
                     X_sample = X_sample.sample(MAX_ROWS, random_state=42)
                     y_sample = y_sample.loc[X_sample.index]
-    
+
                 with st.spinner("Training model... please wait"):
                     from sklearn.model_selection import train_test_split
                     from sklearn.preprocessing  import StandardScaler
                     from sklearn.decomposition  import PCA
-
                     import time
+
                     start_time = time.time()
 
                     X_train, X_test, y_train, y_test = train_test_split(
                         X_sample, y_sample, test_size=0.2, random_state=42
                     )
-    
+
                     # ── Scaling ──
-                    scaler = None
+                    scaler      = None
                     needs_scale = model_name in ["KNN", "SVM", "Linear Regression", "Logistic Regression"]
-    
+
                     if needs_scale or X_train.shape[1] > 100:
                         scaler  = StandardScaler()
                         X_train = scaler.fit_transform(X_train)
@@ -932,63 +1030,75 @@ if file is not None:
                     else:
                         X_train = X_train.values
                         X_test  = X_test.values
-    
+
                     # ── PCA ──
                     pca         = None
                     pca_n_after = None
-    
+
                     if X_train.shape[1] > 100:
                         pca         = PCA(n_components=0.90, random_state=42)
                         X_train     = pca.fit_transform(X_train)
                         X_test      = pca.transform(X_test)
                         pca_n_after = X_train.shape[1]
-    
+
                     # ── Model Init ──
                     if model_name == "Linear Regression":
                         from sklearn.linear_model import LinearRegression
                         model = LinearRegression()
-    
+
                     elif model_name == "Logistic Regression":
                         from sklearn.linear_model import LogisticRegression
                         model = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs")
-    
+
                     elif model_name == "KNN":
                         from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
                         model = (KNeighborsClassifier(n_neighbors=5, weights="distance")
-                                if task_type == "Classification"
-                                else KNeighborsRegressor(n_neighbors=5, weights="distance"))
-    
+                                 if task_type == "Classification"
+                                 else KNeighborsRegressor(n_neighbors=5, weights="distance"))
+
                     elif model_name == "SVM":
                         from sklearn.svm import SVC, SVR
-                        model = (SVC(kernel="rbf", C=1.0, gamma="scale")
-                                if task_type == "Classification"
-                                else SVR(kernel="rbf", C=1.0, gamma="scale"))
-    
+                        model = (SVC(kernel=hp["kernel"], C=hp["C"], gamma=hp["gamma"])
+                                 if task_type == "Classification"
+                                 else SVR(kernel=hp["kernel"], C=hp["C"], gamma=hp["gamma"]))
+
                     elif model_name == "Decision Tree":
                         from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-                        model = (DecisionTreeClassifier(max_depth=5, min_samples_split=5, min_samples_leaf=2)
-                                if task_type == "Classification"
-                                else DecisionTreeRegressor(max_depth=5, min_samples_split=5, min_samples_leaf=2))
-    
+                        model = (DecisionTreeClassifier(
+                                     max_depth=hp["max_depth"],
+                                     min_samples_split=hp["min_samples_split"],
+                                     min_samples_leaf=hp["min_samples_leaf"]
+                                 ) if task_type == "Classification"
+                                 else DecisionTreeRegressor(
+                                     max_depth=hp["max_depth"],
+                                     min_samples_split=hp["min_samples_split"],
+                                     min_samples_leaf=hp["min_samples_leaf"]
+                                 ))
+
                     else:  # Random Forest
                         from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-                        model = (RandomForestClassifier(n_estimators=150, max_depth=7,
-                                                        min_samples_split=5, min_samples_leaf=2,
-                                                        random_state=42, n_jobs=-1)
-                                if task_type == "Classification"
-                                else RandomForestRegressor(n_estimators=150, max_depth=7,
-                                                            min_samples_split=5, min_samples_leaf=2,
-                                                            random_state=42, n_jobs=-1))
-    
+                        model = (RandomForestClassifier(
+                                     n_estimators=hp["n_estimators"],
+                                     max_depth=hp["max_depth"],
+                                     min_samples_split=hp["min_samples_split"],
+                                     min_samples_leaf=hp["min_samples_leaf"],
+                                     random_state=42, n_jobs=-1
+                                 ) if task_type == "Classification"
+                                 else RandomForestRegressor(
+                                     n_estimators=hp["n_estimators"],
+                                     max_depth=hp["max_depth"],
+                                     min_samples_split=hp["min_samples_split"],
+                                     min_samples_leaf=hp["min_samples_leaf"],
+                                     random_state=42, n_jobs=-1
+                                 ))
+
                     # ── Train ──
                     model.fit(X_train, y_train)
                     preds = model.predict(X_test)
 
-                    end_time = time.time()
+                    end_time   = time.time()
                     train_time = end_time - start_time
-                    st.session_state["train_time"] = train_time
-                    
-    
+
                     # ── Save to session_state ──
                     st.session_state["trained_model"]      = model
                     st.session_state["trained_preds"]      = preds.tolist()
@@ -998,6 +1108,8 @@ if file is not None:
                     st.session_state["trained_target"]     = target
                     st.session_state["trained_features"]   = X.columns.tolist()
                     st.session_state["trained_pca_n"]      = pca_n_after
+                    st.session_state["trained_hp"]         = hp
+                    st.session_state["train_time"]         = train_time
                     st.session_state["scaler"]             = scaler
                     st.session_state["pca"]                = pca
 
@@ -1008,62 +1120,68 @@ if file is not None:
                 task       = st.session_state["trained_task"]
                 mdl_name   = st.session_state["trained_model_name"]
                 pca_n      = st.session_state["trained_pca_n"]
- 
+                used_hp    = st.session_state.get("trained_hp", {})
+
                 if pca_n:
                     st.info(f"PCA applied → reduced to {pca_n} features (90% variance retained)")
+
+                # show used hyperparams
+                if used_hp:
+                    hp_str = " &nbsp;|&nbsp; ".join([f"**{k}**: {v}" for k, v in used_hp.items()])
+                    st.markdown(f"<small style='color:#8b949e;font-family:monospace;'>Params used — {hp_str}</small>",
+                                unsafe_allow_html=True)
+
                 st.markdown("### Model Performance")
- 
+
                 if task == "Regression":
                     from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
                     r2   = r2_score(y_test_arr, preds)
                     mse  = mean_squared_error(y_test_arr, preds)
                     rmse = np.sqrt(mse)
                     mae  = mean_absolute_error(y_test_arr, preds)
- 
+
                     col1, col2, col3, col4 = st.columns(4)
                     col1.metric("R² Score", round(r2, 4))
                     col2.metric("MAE",      round(mae, 4))
                     col3.metric("MSE",      round(mse, 4))
                     col4.metric("RMSE",     round(rmse, 4))
+
                 else:
                     from sklearn.metrics import (accuracy_score, confusion_matrix,
                                                  classification_report)
                     acc = accuracy_score(y_test_arr, preds)
                     st.metric("Accuracy", f"{round(acc * 100, 2)}%")
- 
-                    # Classification Report
+
                     st.markdown("### Classification Report")
-                    report = classification_report(y_test_arr, preds, output_dict=True, zero_division=0)
+                    report    = classification_report(y_test_arr, preds, output_dict=True, zero_division=0)
                     report_df = pd.DataFrame(report).transpose().round(2)
                     st.dataframe(report_df, use_container_width=True)
- 
-                    # Confusion Matrix
+
                     st.markdown("### Confusion Matrix")
-                    cm = confusion_matrix(y_test_arr, preds)
+                    cm        = confusion_matrix(y_test_arr, preds)
                     n_classes = cm.shape[0]
-                    fig_size  = max(3, min(6, n_classes * 1.2))  
-                    fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+                    fig_size  = max(3, min(6, n_classes * 1.2))
+                    fig, ax   = plt.subplots(figsize=(fig_size, fig_size))
                     fig.patch.set_facecolor("#0d1117")
                     ax.set_facecolor("#0d1117")
                     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax,
-                                linewidths=0.5, linecolor="#151c28",
+                                linewidths=0.5, linecolor="#161b22",
                                 annot_kws={"size": 10})
-                    ax.set_xlabel("Predicted", color="#64748b", fontsize=9)
-                    ax.set_ylabel("Actual",    color="#64748b", fontsize=9)
-                    ax.tick_params(colors="#64748b", labelsize=8)
+                    ax.set_xlabel("Predicted", color="#8b949e", fontsize=9)
+                    ax.set_ylabel("Actual",    color="#8b949e", fontsize=9)
+                    ax.tick_params(colors="#8b949e", labelsize=8)
                     for s in ax.spines.values(): s.set_visible(False)
                     plt.tight_layout()
-                    
                     _, mid, _ = st.columns([1, 2, 1])
                     with mid:
                         st.pyplot(fig)
                     plt.close()
- 
+
                 st.success(f"✅ {mdl_name} trained successfully!")
-                if "train_time" in st.session_state:
-                    st.info(f"⏱ Training Time: {round(st.session_state['train_time'], 2)} seconds")
- 
-                # -------- Download Model .pkl --------
+                st.info(f"⏱ Training Time: {round(st.session_state['train_time'], 2)} seconds")
+
+                # ── Download Model .pkl ──
+                import pickle
                 model_bundle = {
                     "model"   : st.session_state["trained_model"],
                     "scaler"  : st.session_state.get("scaler"),
@@ -1071,16 +1189,16 @@ if file is not None:
                     "features": st.session_state["trained_features"],
                     "target"  : st.session_state["trained_target"],
                     "task"    : st.session_state["trained_task"],
+                    "params"  : st.session_state.get("trained_hp", {}),
                 }
- 
+
                 buffer = io.BytesIO()
                 pickle.dump(model_bundle, buffer)
                 buffer.seek(0)
- 
+
                 st.download_button(
                     label="⬇ Download Model (.pkl)",
                     data=buffer,
                     file_name=f"{mdl_name.replace(' ', '_')}_model.pkl",
                     mime="application/octet-stream"
                 )
-
