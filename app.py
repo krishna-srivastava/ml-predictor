@@ -7,6 +7,15 @@ import io
 import pickle
 
 @st.cache_data
+def load_data(file_bytes):          
+    df = pd.read_csv(io.BytesIO(file_bytes), engine="pyarrow")
+    for col in df.select_dtypes(include=["object"]).columns:
+        df[col] = df[col].apply(
+            lambda x: x.decode("utf-8", errors="ignore") if isinstance(x, bytes) else x
+        )
+    return df
+
+@st.cache_data
 def make_num_plots(data_list, col_name, mean_val, median_val):
     clean = pd.Series(data_list)
     fig1, ax = plt.subplots(figsize=(5, 3))
@@ -48,15 +57,6 @@ def make_box_plot(data_list, col_name):
     plt.tight_layout()
     return fig2
 
-@st.cache_data
-def load_data(file):
-    df = pd.read_csv(file, engine="pyarrow")
-
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].apply(
-            lambda x: x.decode("utf-8", errors="ignore") if isinstance(x, bytes) else x
-        )
-    return df
 
 # ================= PAGE CONFIG =================
 st.set_page_config(page_title="ML predicter", layout="wide", page_icon="🚀")
@@ -287,7 +287,7 @@ if file is not None:
 
     if "file_name" not in st.session_state or st.session_state.file_name != file.name:
         st.session_state.file_name = file.name
-        st.session_state.original_df = load_data(file)
+        st.session_state.original_df = load_data(file.read())
         st.session_state.df = st.session_state.original_df.copy()
 
     if "df" not in st.session_state:
@@ -352,8 +352,6 @@ if file is not None:
         col1, col2 = st.columns(2)
 
         with col1:
-            st.write("Rows:", df.shape[0])
-            st.write("Columns:", df.shape[1])
             st.write("Column Names:")
             st.write(df.columns.tolist())
 
@@ -362,7 +360,23 @@ if file is not None:
             st.write(df.dtypes)
 
         st.subheader("Statistical Summary")
-        st.write(df.describe(include="all"))
+        # Numeric columns
+        numeric_cols = df.select_dtypes(include=['number']).columns
+        if len(numeric_cols) > 0:
+            st.write("**Numerical Columns**")
+            st.dataframe(df[numeric_cols].describe(), use_container_width=True)
+
+        # Object/Categorical columns
+        object_cols = df.select_dtypes(include=['object', 'category']).columns
+        if len(object_cols) > 0:
+            st.write("**Categorical Columns**")
+            st.dataframe(df[object_cols].describe(), use_container_width=True)
+
+        # Bool columns
+        bool_cols = df.select_dtypes(include=['bool']).columns
+        if len(bool_cols) > 0:
+            st.write("**Boolean Columns**")
+            st.dataframe(df[bool_cols].describe(), use_container_width=True)
 
         st.subheader("Missing Values")
         missing = df.isnull().sum()
@@ -372,11 +386,7 @@ if file is not None:
             "Missing Values": missing,
             "Percentage (%)": missing_percent.round(2)
         })
-
         st.dataframe(missing_df[missing_df["Missing Values"] > 0], use_container_width=True)
-
-        st.subheader("Duplicate Rows")
-        st.write("Total Duplicate Rows:", df.duplicated().sum())
 
 
 # ---------- COLUMN ANALYZER ----------
