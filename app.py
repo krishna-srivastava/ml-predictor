@@ -376,25 +376,33 @@ if file is not None:
  
         # ── pre-compute outlier info ONCE (used for both Health Score + table) ──
         @st.cache_data
-        def compute_outliers(data_bytes, num_cols):
-            _df = pd.read_csv(io.BytesIO(data_bytes))
+        def compute_outliers(df, num_cols):
+            _df = df.copy()
             rows = []
             for col in num_cols:
-                q1, q3 = _df[col].quantile(0.25), _df[col].quantile(0.75)
-                iqr    = q3 - q1
+                if col not in _df.columns:
+                    continue  # 🔥 IMPORTANT FIX
+
+                s = _df[col].dropna()
+                if s.empty:
+                    continue
+
+                q1, q3 = s.quantile(0.25), s.quantile(0.75)
+                iqr = q3 - q1
                 lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-                count  = int(((_df[col] < lower) | (_df[col] > upper)).sum())
+                count = int(((s < lower) | (s > upper)).sum())
+
                 rows.append({
-                    "Column"       : col,
-                    "Lower Bound"  : round(float(lower), 3),
-                    "Upper Bound"  : round(float(upper), 3),
+                    "Column": col,
+                    "Lower Bound": round(float(lower), 3),
+                    "Upper Bound": round(float(upper), 3),
                     "Outlier Count": count,
-                    "Outlier %"    : round((count / len(_df)) * 100, 2),
+                    "Outlier %": round((count / len(s)) * 100, 2) if len(s) else 0,
                 })
             return rows
  
         if numeric_cols:
-            outlier_rows = compute_outliers(file.getvalue(), numeric_cols)
+            outlier_rows = compute_outliers(df, numeric_cols)
         else:
             outlier_rows = []
  
@@ -548,6 +556,7 @@ if file is not None:
             st.dataframe(outlier_df, use_container_width=True)
 
 
+
     # ================= TAB 2 — COLUMN ANALYSER =================
     with eda_tab2:
  
@@ -657,28 +666,42 @@ if file is not None:
  
             # ── Charts ──
             sec("Visualisations")
-            plot_series = series if len(series) <= 5000 else series.sample(5000, random_state=42)
- 
-            chart_l, chart_r = st.columns(2)
-            with chart_l:
-                st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
-                            'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
-                            'margin-bottom:0.5rem;">Distribution + KDE</p>',
-                            unsafe_allow_html=True)
-                fig1 = make_num_plots(plot_series.tolist(), column, mean_val, median_val)
-                st.pyplot(fig1)
-                download_chart(fig1, key="ml_hist_download")
-                plt.close(fig1)
- 
-            with chart_r:
-                st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
-                            'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
-                            'margin-bottom:0.5rem;">Box Plot</p>',
-                            unsafe_allow_html=True)
-                fig2 = make_box_plot(plot_series.tolist(), column)
-                st.pyplot(fig2)
-                download_chart(fig2, key="ml_box_download")
-                plt.close(fig2)
+            plot_series = (
+                series
+                if len(series) <= 5000
+                else series.sample(5000, random_state=42)
+            )
+
+            plot_series = plot_series.dropna()
+
+            if plot_series.nunique() < 2:
+                st.markdown("""
+                <div class="banner banner-warn">
+                    ⚠ &nbsp;<span>Not enough variation for KDE/distribution plotting.</span>
+                </div>
+                """, unsafe_allow_html=True)
+
+            else:
+                chart_l, chart_r = st.columns(2)
+                with chart_l:
+                    st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
+                                'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
+                                'margin-bottom:0.5rem;">Distribution + KDE</p>',
+                                unsafe_allow_html=True)
+                    fig1 = make_num_plots(plot_series.tolist(), column, mean_val, median_val)
+                    st.pyplot(fig1)
+                    download_chart(fig1, key="ml_hist_download")
+                    plt.close(fig1)
+    
+                with chart_r:
+                    st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
+                                'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
+                                'margin-bottom:0.5rem;">Box Plot</p>',
+                                unsafe_allow_html=True)
+                    fig2 = make_box_plot(plot_series.tolist(), column)
+                    st.pyplot(fig2)
+                    download_chart(fig2, key="ml_box_download")
+                    plt.close(fig2)
  
             divider()
  
@@ -1061,7 +1084,7 @@ if file is not None:
             mime="text/csv",
             key="ml_download_csv",
         )
- 
+
 
 
     # ================= TAB 4 — ENCODING =================
@@ -1086,7 +1109,7 @@ if file is not None:
  
         # ── always pull latest ──
         df       = st.session_state.df
-        cat_cols = df.select_dtypes(include="object").columns.tolist()
+        cat_cols = df.select_dtypes(include=["object", "category", "string"]).columns.tolist()
  
         # ── enc_history is SEPARATE from df_history (Tab 3) ──
         if "enc_history" not in st.session_state:
@@ -1169,20 +1192,26 @@ if file is not None:
             is_disabled = has_missing or ohe_blocked
             if st.button("Apply Encoding", key="enc_btn", disabled=is_disabled):
                 working_df = st.session_state.df.copy()
-                working_df[selected_col] = working_df[selected_col].astype(str)
+                series = working_df[selected_col]
                 encoded_ok = False
  
                 if method == "Label Encoding":
                     from sklearn.preprocessing import LabelEncoder
                     le = LabelEncoder()
-                    working_df[selected_col] = le.fit_transform(working_df[selected_col])
-                    msg        = (f"Label Encoding applied on "
-                                  f"<strong>{selected_col}</strong>")
+                    working_df[selected_col] = le.fit_transform(series.astype(str))
+
+                    msg = (
+                        f"Label Encoding applied on "
+                        f"<strong>{selected_col}</strong>"
+                    )
+
                     encoded_ok = True
  
                 elif method == "One Hot Encoding":
-                    dummies    = pd.get_dummies(
-                        working_df[selected_col], prefix=selected_col
+                    dummies = pd.get_dummies(
+                            series,
+                            prefix=selected_col,
+                            dtype=np.int8
                     )
                     working_df = pd.concat(
                         [working_df.drop(columns=[selected_col]), dummies], axis=1
@@ -1196,24 +1225,42 @@ if file is not None:
                     if not order.strip():
                         banner("Please enter the ordinal order before applying.", "warn")
                     else:
-                        values        = [x.strip() for x in order.split(",")]
-                        actual_values = working_df[selected_col].dropna().unique().tolist()
-                        invalid       = set(values) - set(actual_values)
+                        values = [x.strip() for x in order.split(",")]
+                        actual_values = (
+                            working_df[selected_col]
+                            .dropna()
+                            .unique()
+                            .tolist()
+                        )
+
+                        invalid = set(values) - set(actual_values)
+                        missing_vals = set(actual_values) - set(values)
+
                         if invalid:
                             banner(
                                 f"Invalid value(s): <strong>{', '.join(invalid)}</strong> "
                                 f"— check spelling and try again.",
                                 "err",
                             )
+                        elif missing_vals:
+                            banner(
+                                f"Missing category(s): <strong>{', '.join(missing_vals)}</strong>",
+                                "err",
+                            )
                         else:
                             mapping = {val: i for i, val in enumerate(values)}
-                            working_df[selected_col] = working_df[selected_col].map(mapping)
-                            msg        = (f"Manual Ordinal Encoding applied on "
-                                          f"<strong>{selected_col}</strong>")
+
+                            working_df[selected_col] = (
+                                working_df[selected_col]
+                                .map(mapping)
+                            )
+                            msg = (
+                                f"Manual Ordinal Encoding applied on "
+                                f"<strong>{selected_col}</strong>"
+                            )
                             encoded_ok = True
  
                 if encoded_ok:
-                    # save to ENC-SPECIFIC history only
                     st.session_state["enc_history"].append(st.session_state.df.copy())
                     st.session_state.df          = working_df
                     st.session_state["enc_msg"]  = msg
@@ -1247,15 +1294,11 @@ if file is not None:
  
         with reset_c:
             if st.button("↺  Reset Encoding", key="enc_reset_btn"):
-                # Tab 3 ka kaam preserve karo — enc_history ki sabse purani entry
-                # woh state hai jab user Tab 4 pe aaya tha (Tab 3 done, Tab 4 shuru)
-                # Agar enc_history mein kuch hai toh pehli entry restore karo,
-                # warna original_df se karo
                 if st.session_state["enc_history"]:
                     st.session_state.df = st.session_state["enc_history"][0].copy()
                 else:
                     st.session_state.df = st.session_state.original_df.copy()
-                st.session_state["enc_history"] = []   # sirf Tab 4 ki history clear
+                st.session_state["enc_history"] = [] 
                 st.session_state["enc_msg"]     = "Encoding reset"
                 st.rerun()
  
@@ -1294,13 +1337,13 @@ if file is not None:
     with eda_tab5:
         def sec(title):
             st.markdown(f'<div class="sec-label">{title}</div>', unsafe_allow_html=True)
- 
+
         def divider():
             st.markdown(
-                "<hr style='border:none;border-top:1px solid #0f1520;margin:1.6rem 0;'>",
+                "<hr style='border:none;border-top:1px solid #151c28;margin:1.6rem 0;'>",
                 unsafe_allow_html=True,
             )
- 
+
         def banner(msg, kind="ok"):
             icons = {"ok": "✓", "warn": "⚠", "err": "✕"}
             st.markdown(
@@ -1308,236 +1351,230 @@ if file is not None:
                 f'{icons[kind]} &nbsp;<span>{msg}</span></div>',
                 unsafe_allow_html=True,
             )
- 
+
         df = st.session_state.df
- 
-        # ── Guard: non-numeric columns present ──
+
         non_numeric = df.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
+
         if non_numeric:
             banner(
                 f"Please encode these columns first in the <strong>Encoding</strong> tab: "
                 f"<code>{'</code>, <code>'.join(non_numeric)}</code>",
                 "warn",
             )
-            st.stop()
- 
-        num_cols = df.select_dtypes(include=np.number).columns.tolist()
-        if len(num_cols) < 2:
-            banner("At least 2 numeric columns are required to run Feature Importance.", "warn")
-            st.stop()
- 
-        # ── 1. Configuration ──
-        sec("Configuration")
- 
-        cfg1, cfg2 = st.columns(2)
-        with cfg1:
-            target_col = st.selectbox(
-                "Select Target Column (Y)", num_cols, key="fi_target"
-            )
-        feature_cols = [c for c in num_cols if c != target_col]
- 
-        MAX_ROWS     = 20_000
-        is_large     = len(df) > MAX_ROWS
- 
-        with cfg2:
-            n_estimators = st.slider(
-                "Number of Trees", min_value=50, max_value=500,
-                value=100, step=50, key="fi_n_est"
-            )
- 
-        # model type preview
-        target_unique = df[target_col].nunique()
-        is_classifier = target_unique <= 10
-        model_label   = "Classifier" if is_classifier else "Regressor"
-        model_color   = "#f59e0b" if is_classifier else "#3b82f6"
- 
-        st.markdown(
-            f'<div style="background:#0d1117;border:1px solid #151c28;border-radius:8px;'
-            f'padding:0.65rem 1rem;font-family:\'DM Mono\',monospace;font-size:0.72rem;'
-            f'color:#64748b;margin:0.5rem 0 0.4rem 0;">'
-            f'Auto-detected model &nbsp;→&nbsp; '
-            f'<span style="color:{model_color};font-weight:600;">'
-            f'Random Forest {model_label}</span>'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;'
-            f'<span style="color:#e2e8f0;">{len(feature_cols)}</span> features'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;'
-            f'<span style="color:#e2e8f0;">{target_unique}</span> unique target values'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
- 
-        if is_large:
-            banner(
-                f"Large dataset ({len(df):,} rows) — Feature Importance will use "
-                f"{MAX_ROWS:,} random samples for speed.",
-                "warn",
-            )
- 
-        divider()
- 
-        # ── 2. Run ──
-        sec("Run Feature Importance")
- 
-        if st.button("▶  Run Feature Importance", key="fi_btn"):
-            data = df[feature_cols + [target_col]].dropna()
- 
-            if data.shape[0] < 10:
-                banner(
-                    "Not enough clean rows after dropping missing values (need ≥ 10).",
-                    "err",
-                )
+
+        else:
+            num_cols = df.select_dtypes(include=np.number).columns.tolist()
+
+            if len(num_cols) < 2:
+                banner("At least 2 numeric columns are required to run Feature Importance.", "warn")
+
             else:
-                if len(data) > MAX_ROWS:
-                    data = data.sample(MAX_ROWS, random_state=42)
- 
-                X = data[feature_cols]
-                y = data[target_col]
- 
-                with st.spinner("Training Random Forest… this may take a moment."):
-                    if is_classifier:
-                        from sklearn.ensemble import RandomForestClassifier
-                        model = RandomForestClassifier(
-                            n_estimators=n_estimators, random_state=42, n_jobs=-1
-                        )
-                    else:
-                        from sklearn.ensemble import RandomForestRegressor
-                        model = RandomForestRegressor(
-                            n_estimators=n_estimators, random_state=42, n_jobs=-1
-                        )
- 
-                    model.fit(X, y)
- 
-                importance_df = pd.DataFrame({
-                    "Feature"         : feature_cols,
-                    "Importance Score": np.round(model.feature_importances_, 4),
-                    "Rank"            : range(1, len(feature_cols) + 1),
-                }).sort_values("Importance Score", ascending=False).reset_index(drop=True)
-                importance_df["Rank"] = range(1, len(importance_df) + 1)
-                importance_df["Cumulative %"] = (
-                    importance_df["Importance Score"].cumsum() * 100
-                ).round(2)
- 
-                st.session_state["importance_df"]    = importance_df
-                st.session_state["fi_target_used"]   = target_col
-                st.session_state["fi_model_label"]   = model_label
-                st.session_state["fi_rows_used"]     = len(data)
- 
-        # ── 3. Results ──
-        if "importance_df" in st.session_state:
-            importance_df = st.session_state["importance_df"]
-            divider()
- 
-            sec(f"Results — Target: {st.session_state['fi_target_used']}  "
-                f"({st.session_state['fi_model_label']})")
- 
-            # top-3 highlight cards
-            top_n = min(3, len(importance_df))
-            card_cols = st.columns(top_n)
-            medal = ["🥇", "🥈", "🥉"]
-            for i, col in enumerate(card_cols):
-                row = importance_df.iloc[i]
-                col.markdown(
-                    f'<div style="background:#0d1117;border:1px solid #151c28;'
-                    f'border-top:3px solid #3b82f6;border-radius:10px;'
-                    f'padding:0.9rem 1rem;text-align:center;">'
-                    f'<div style="font-size:1.3rem;">{medal[i]}</div>'
-                    f'<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;'
-                    f'color:#64748b;text-transform:uppercase;letter-spacing:0.1em;'
-                    f'margin:0.3rem 0 0.2rem 0;">#{int(row["Rank"])}</div>'
-                    f'<div style="font-size:0.85rem;font-weight:600;color:#e2e8f0;'
-                    f'word-break:break-all;">{row["Feature"]}</div>'
-                    f'<div style="font-family:\'DM Mono\',monospace;font-size:0.78rem;'
-                    f'color:#3b82f6;margin-top:0.3rem;">{row["Importance Score"]}</div>'
+                # ── 1. Configuration ──
+                sec("Configuration")
+
+                cfg1, cfg2 = st.columns(2)
+                with cfg1:
+                    target_col = st.selectbox(
+                        "Select Target Column (Y)", num_cols, key="fi_target"
+                    )
+                feature_cols = [c for c in num_cols if c != target_col]
+
+                MAX_ROWS = 20_000
+                is_large = len(df) > MAX_ROWS
+
+                with cfg2:
+                    n_estimators = st.slider(
+                        "Number of Trees", min_value=50, max_value=500,
+                        value=100, step=50, key="fi_n_est"
+                    )
+
+                target_unique = df[target_col].nunique()
+                is_classifier = target_unique <= 10
+                model_label   = "Classifier" if is_classifier else "Regressor"
+                model_color   = "#f59e0b" if is_classifier else "#3b82f6"
+
+                st.markdown(
+                    f'<div style="background:#0d1117;border:1px solid #151c28;border-radius:8px;'
+                    f'padding:0.65rem 1rem;font-family:\'DM Mono\',monospace;font-size:0.72rem;'
+                    f'color:#64748b;margin:0.5rem 0 0.4rem 0;">'
+                    f'Auto-detected model &nbsp;→&nbsp; '
+                    f'<span style="color:{model_color};font-weight:600;">'
+                    f'Random Forest {model_label}</span>'
+                    f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+                    f'<span style="color:#e2e8f0;">{len(feature_cols)}</span> features'
+                    f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+                    f'<span style="color:#e2e8f0;">{target_unique}</span> unique target values'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
- 
-            st.markdown("<br>", unsafe_allow_html=True)
- 
-            # full table — height dynamic so ALL rows visible, no truncation
-            row_height  = 35
-            header_h    = 38
-            table_h     = min(600, header_h + len(importance_df) * row_height)
-            st.dataframe(
-                importance_df,
-                use_container_width=True,
-                hide_index=True,
-                height=table_h,
-            )
- 
-            rows_used = st.session_state.get("fi_rows_used", "?")
-            st.caption(f"Trained on {rows_used:,} rows · {n_estimators} trees")
- 
-            divider()
- 
-            # ── 4. Chart ──
-            sec("Importance Chart")
- 
-            fig, ax = plt.subplots(
-                figsize=(8, max(3, len(importance_df) * 0.42))
-            )
-            fig.patch.set_facecolor("#0d1117")
-            ax.set_facecolor("#0d1117")
- 
-            # gradient colors: top features brighter
-            n       = len(importance_df)
-            alphas  = np.linspace(1.0, 0.35, n)
-            bar_colors = [
-                (59/255, 130/255, 246/255, a) for a in alphas
-            ]
- 
-            bars = ax.barh(
-                importance_df["Feature"][::-1],
-                importance_df["Importance Score"][::-1],
-                color=bar_colors[::-1],
-                edgecolor="none",
-            )
- 
-            # value labels on bars
-            for bar, val in zip(bars, importance_df["Importance Score"][::-1]):
-                ax.text(
-                    bar.get_width() + 0.001,
-                    bar.get_y() + bar.get_height() / 2,
-                    f"{val:.4f}",
-                    va="center", ha="left",
-                    color="#64748b", fontsize=7,
-                )
- 
-            ax.set_xlabel("Importance Score", color="#64748b", fontsize=8)
-            ax.tick_params(colors="#64748b", labelsize=7)
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-            ax.xaxis.grid(True, color="#151c28", linewidth=0.5)
-            plt.tight_layout()
-            st.pyplot(fig)
-            download_chart(fig, key="fi_chart_download")
-            plt.close(fig)
- 
-            divider()
- 
-            # ── 5. Download ──
-            sec("Download")
- 
-            dl1, dl2 = st.columns(2)
-            with dl1:
-                csv_data = st.session_state.df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "⬇  Download Dataset CSV",
-                    data=csv_data,
-                    file_name="feature_selected_data.csv",
-                    mime="text/csv",
-                    key="fi_dl_dataset",
-                )
-            with dl2:
-                imp_csv = importance_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "⬇  Download Importance Scores CSV",
-                    data=imp_csv,
-                    file_name="feature_importance.csv",
-                    mime="text/csv",
-                    key="fi_dl_importance",
-                )
- 
+
+                if is_large:
+                    banner(
+                        f"Large dataset ({len(df):,} rows) — Feature Importance will use "
+                        f"{MAX_ROWS:,} random samples for speed.",
+                        "warn",
+                    )
+
+                divider()
+
+                # ── 2. Run ──
+                sec("Run Feature Importance")
+
+                if st.button("▶  Run Feature Importance", key="fi_btn"):
+                    data = df[feature_cols + [target_col]].dropna()
+
+                    if data.shape[0] < 10:
+                        banner(
+                            "Not enough clean rows after dropping missing values (need ≥ 10).",
+                            "err",
+                        )
+                    else:
+                        if len(data) > MAX_ROWS:
+                            data = data.sample(MAX_ROWS, random_state=42)
+
+                        X = data[feature_cols]
+                        y = data[target_col]
+
+                        with st.spinner("Training Random Forest… this may take a moment."):
+                            if is_classifier:
+                                from sklearn.ensemble import RandomForestClassifier
+                                model = RandomForestClassifier(
+                                    n_estimators=n_estimators, random_state=42, n_jobs=-1
+                                )
+                            else:
+                                from sklearn.ensemble import RandomForestRegressor
+                                model = RandomForestRegressor(
+                                    n_estimators=n_estimators, random_state=42, n_jobs=-1
+                                )
+                            model.fit(X, y)
+
+                        importance_df = pd.DataFrame({
+                            "Feature"         : feature_cols,
+                            "Importance Score": np.round(model.feature_importances_, 4),
+                            "Rank"            : range(1, len(feature_cols) + 1),
+                        }).sort_values("Importance Score", ascending=False).reset_index(drop=True)
+                        importance_df["Rank"]         = range(1, len(importance_df) + 1)
+                        importance_df["Cumulative %"] = (
+                            importance_df["Importance Score"].cumsum() * 100
+                        ).round(2)
+
+                        st.session_state["importance_df"]  = importance_df
+                        st.session_state["fi_target_used"] = target_col
+                        st.session_state["fi_model_label"] = model_label
+                        st.session_state["fi_rows_used"]   = len(data)
+
+                # ── 3. Results ──
+                if "importance_df" in st.session_state:
+                    importance_df = st.session_state["importance_df"]
+                    divider()
+
+                    sec(f"Results — Target: {st.session_state['fi_target_used']}  "
+                        f"({st.session_state['fi_model_label']})")
+
+                    top_n     = min(3, len(importance_df))
+                    card_cols = st.columns(top_n)
+                    medal     = ["🥇", "🥈", "🥉"]
+
+                    for i, col in enumerate(card_cols):
+                        row = importance_df.iloc[i]
+                        col.markdown(
+                            f'<div style="background:#0d1117;border:1px solid #151c28;'
+                            f'border-top:3px solid #3b82f6;border-radius:10px;'
+                            f'padding:0.9rem 1rem;text-align:center;">'
+                            f'<div style="font-size:1.3rem;">{medal[i]}</div>'
+                            f'<div style="font-family:\'DM Mono\',monospace;font-size:0.62rem;'
+                            f'color:#64748b;text-transform:uppercase;letter-spacing:0.1em;'
+                            f'margin:0.3rem 0 0.2rem 0;">#{int(row["Rank"])}</div>'
+                            f'<div style="font-size:0.85rem;font-weight:600;color:#e2e8f0;'
+                            f'word-break:break-all;">{row["Feature"]}</div>'
+                            f'<div style="font-family:\'DM Mono\',monospace;font-size:0.78rem;'
+                            f'color:#3b82f6;margin-top:0.3rem;">{row["Importance Score"]}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                    st.markdown("<br>", unsafe_allow_html=True)
+
+                    row_height = 35
+                    header_h   = 38
+                    table_h    = min(600, header_h + len(importance_df) * row_height)
+                    st.dataframe(
+                        importance_df,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=table_h,
+                    )
+
+                    rows_used = st.session_state.get("fi_rows_used", "?")
+                    st.caption(f"Trained on {rows_used:,} rows · {n_estimators} trees")
+
+                    divider()
+
+                    # ── 4. Chart ──
+                    sec("Importance Chart")
+
+                    fig, ax = plt.subplots(
+                        figsize=(8, max(3, len(importance_df) * 0.42))
+                    )
+                    fig.patch.set_facecolor("#0d1117")
+                    ax.set_facecolor("#0d1117")
+
+                    n          = len(importance_df)
+                    alphas     = np.linspace(1.0, 0.35, n)
+                    bar_colors = [(59/255, 130/255, 246/255, a) for a in alphas]
+
+                    bars = ax.barh(
+                        importance_df["Feature"][::-1],
+                        importance_df["Importance Score"][::-1],
+                        color=bar_colors[::-1],
+                        edgecolor="none",
+                    )
+
+                    for bar, val in zip(bars, importance_df["Importance Score"][::-1]):
+                        ax.text(
+                            bar.get_width() + 0.001,
+                            bar.get_y() + bar.get_height() / 2,
+                            f"{val:.4f}",
+                            va="center", ha="left",
+                            color="#64748b", fontsize=7,
+                        )
+
+                    ax.set_xlabel("Importance Score", color="#64748b", fontsize=8)
+                    ax.tick_params(colors="#64748b", labelsize=7)
+                    for spine in ax.spines.values():
+                        spine.set_visible(False)
+                    ax.xaxis.grid(True, color="#151c28", linewidth=0.5)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    download_chart(fig, key="fi_chart_download")
+                    plt.close(fig)
+
+                    divider()
+
+                    # ── 5. Download ──
+                    sec("Download")
+
+                    dl1, dl2 = st.columns(2)
+                    with dl1:
+                        csv_data = st.session_state.df.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "⬇  Download Dataset CSV",
+                            data=csv_data,
+                            file_name="feature_selected_data.csv",
+                            mime="text/csv",
+                            key="fi_dl_dataset",
+                        )
+                    with dl2:
+                        imp_csv = importance_df.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "⬇  Download Importance Scores CSV",
+                            data=imp_csv,
+                            file_name="feature_importance.csv",
+                            mime="text/csv",
+                            key="fi_dl_importance",
+                        )
+
 
 
     # ================= TAB 6 — MODEL TRAINING =================
