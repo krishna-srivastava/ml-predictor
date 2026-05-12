@@ -19,13 +19,18 @@ def download_chart(fig, key):
     )
 
 @st.cache_data
-def load_data(file_bytes):          
-    df = pd.read_csv(io.BytesIO(file_bytes), engine="pyarrow")
-    for col in df.select_dtypes(include=["object"]).columns:
-        df[col] = df[col].apply(
-            lambda x: x.decode("utf-8", errors="ignore") if isinstance(x, bytes) else x
-        )
-    return df
+def load_data(file_bytes):
+    if not file_bytes or len(file_bytes.strip()) == 0:
+        raise ValueError("Uploaded CSV file is empty.")
+    try:
+        df = pd.read_csv(io.BytesIO(file_bytes), engine="pyarrow")
+        if df.shape[1] == 0:
+            raise ValueError("CSV has no columns.")
+        if df.empty:
+            raise ValueError("CSV has columns but no data rows.")
+        return df
+    except Exception as e:
+        raise ValueError(f"Invalid or corrupted CSV file: {str(e)}")
 
 @st.cache_data
 def make_num_plots(data_list, col_name, mean_val, median_val):
@@ -69,6 +74,28 @@ def make_box_plot(data_list, col_name):
     plt.tight_layout()
     return fig2
 
+@st.cache_data
+def compute_outliers(df, num_cols):
+    _df  = df.copy()
+    rows = []
+    for col in num_cols:
+        if col not in _df.columns:
+            continue
+        s = _df[col].dropna()
+        if s.empty:
+            continue
+        q1, q3      = s.quantile(0.25), s.quantile(0.75)
+        iqr         = q3 - q1
+        lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        count       = int(((s < lower) | (s > upper)).sum())
+        rows.append({
+            "Column"       : col,
+            "Lower Bound"  : round(float(lower), 3),
+            "Upper Bound"  : round(float(upper), 3),
+            "Outlier Count": count,
+            "Outlier %"    : round((count / len(s)) * 100, 2) if len(s) else 0,
+        })
+    return rows
 
 # ================= PAGE CONFIG =================
 st.set_page_config(page_title="ML predicter", layout="wide", page_icon="🚀")
@@ -287,7 +314,6 @@ file = st.file_uploader(
     type=["csv"],
     label_visibility="collapsed"
 )
-
 if file is not None:
     if file.size > 100 * 1024 * 1024:
         st.markdown("""
@@ -297,15 +323,56 @@ if file is not None:
         """, unsafe_allow_html=True)
         st.stop()
 
-    if "file_name" not in st.session_state or st.session_state.file_name != file.name:
-        st.session_state.file_name = file.name
-        st.session_state.original_df = load_data(file.read())
-        st.session_state.df = st.session_state.original_df.copy()
-        st.session_state["tab3_history"] = []
-        st.session_state["enc_history"]  = []
+    file_bytes = file.getvalue()
+    if not file_bytes or len(file_bytes.strip()) == 0:
+        st.markdown("""
+        <div class="banner banner-err">
+            ✕ &nbsp;<span>Uploaded CSV file is empty.</span>
+        </div>
+        """, unsafe_allow_html=True)
+        st.stop()
+
+    if (
+        "file_name" not in st.session_state
+        or st.session_state.file_name != file.name
+    ):
+        try:
+            loaded_df = load_data(file_bytes)
+            if loaded_df.shape[1] == 0:
+                st.markdown("""
+                <div class="banner banner-err">
+                    ✕ &nbsp;<span>CSV contains no columns.</span>
+                </div>
+                """, unsafe_allow_html=True)
+                st.stop()
+
+            if loaded_df.empty:
+                st.markdown("""
+                <div class="banner banner-err">
+                    ✕ &nbsp;<span>CSV contains no data rows.</span>
+                </div>
+                """, unsafe_allow_html=True)
+                st.stop()
+
+            st.session_state.file_name = file.name
+            st.session_state.original_df = loaded_df
+            st.session_state.df = loaded_df.copy()
+            st.session_state["tab3_history"] = []
+            st.session_state["enc_history"] = []
+
+        except Exception as e:
+            st.markdown(f"""
+            <div class="banner banner-err">
+                ✕ &nbsp;<span>Invalid CSV file: {str(e)}</span>
+            </div>
+            """, unsafe_allow_html=True)
+            st.stop()
 
     if "df" not in st.session_state:
-        st.markdown('<div class="banner banner-warn">⚠ Data not initialized — please re-upload.</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="banner banner-warn">⚠ Data not initialized — please re-upload.</div>',
+            unsafe_allow_html=True
+        )
         st.stop()
 
     df = st.session_state.df
@@ -358,59 +425,27 @@ if file is not None:
     ])
 
 
-    # ================= TAB 1 — OVERVIEW =================
+# ---------- OVERVIEW ----------
     with eda_tab1:
- 
-        # ── helper: reusable section label (consistent with .sec-label CSS) ──
+
         def sec(title):
             st.markdown(f'<div class="sec-label">{title}</div>', unsafe_allow_html=True)
- 
+
         def divider():
             st.markdown("<hr style='border:none;border-top:1px solid #0f1520;margin:1.8rem 0;'>",
                         unsafe_allow_html=True)
- 
-        # ── pre-compute column groups once ──
+
         numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
         object_cols  = df.select_dtypes(include=["object", "category"]).columns.tolist()
         bool_cols    = df.select_dtypes(include=["bool"]).columns.tolist()
- 
-        # ── pre-compute outlier info ONCE (used for both Health Score + table) ──
-        @st.cache_data
-        def compute_outliers(df, num_cols):
-            _df = df.copy()
-            rows = []
-            for col in num_cols:
-                if col not in _df.columns:
-                    continue  # 🔥 IMPORTANT FIX
 
-                s = _df[col].dropna()
-                if s.empty:
-                    continue
+        outlier_rows = compute_outliers(df, tuple(numeric_cols)) if numeric_cols else []
 
-                q1, q3 = s.quantile(0.25), s.quantile(0.75)
-                iqr = q3 - q1
-                lower, upper = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-                count = int(((s < lower) | (s > upper)).sum())
-
-                rows.append({
-                    "Column": col,
-                    "Lower Bound": round(float(lower), 3),
-                    "Upper Bound": round(float(upper), 3),
-                    "Outlier Count": count,
-                    "Outlier %": round((count / len(s)) * 100, 2) if len(s) else 0,
-                })
-            return rows
- 
-        if numeric_cols:
-            outlier_rows = compute_outliers(df, numeric_cols)
-        else:
-            outlier_rows = []
- 
         # ── 1. Dataset Preview ──
         sec("Dataset Preview")
         st.dataframe(df.head(10), use_container_width=True)
         divider()
- 
+
         # ── 2. Column Info ──
         sec("Column Info")
         c1, c2 = st.columns(2)
@@ -423,7 +458,7 @@ if file is not None:
                         unsafe_allow_html=True)
             st.write(df.dtypes)
         divider()
- 
+
         # ── 3. Statistical Summary ──
         sec("Statistical Summary")
         if numeric_cols:
@@ -439,13 +474,12 @@ if file is not None:
                         unsafe_allow_html=True)
             st.dataframe(df[bool_cols].describe(), use_container_width=True)
         divider()
- 
-        # ── 4. Correlation Table ──
+
+        # ── 4. Correlation Matrix ──
         if len(numeric_cols) > 1:
             sec("Correlation Matrix")
             corr = df[numeric_cols].corr().round(3)
- 
-            # Style the correlation dataframe with a heatmap-like background
+
             def color_corr(val):
                 if pd.isna(val):
                     return "background-color: #0d1117; color: #334155;"
@@ -463,16 +497,16 @@ if file is not None:
                     bg = "#0d1117"
                     fg = "#334155"
                 return f"background-color:{bg}; color:{fg}; font-weight:500;"
- 
-            styled_corr = corr.style.applymap(color_corr)
+
+            styled_corr = corr.style.map(color_corr) 
             st.dataframe(styled_corr, use_container_width=True)
             divider()
- 
+
         # ── 5. Missing Values ──
         sec("Missing Values")
-        missing         = df.isnull().sum()
-        missing_pct     = (missing / len(df)) * 100
-        missing_df      = pd.DataFrame({
+        missing          = df.isnull().sum()
+        missing_pct      = (missing / len(df)) * 100
+        missing_df       = pd.DataFrame({
             "Missing Values": missing,
             "Percentage (%)": missing_pct.round(2)
         })
@@ -486,28 +520,28 @@ if file is not None:
         else:
             st.dataframe(missing_filtered, use_container_width=True)
         divider()
- 
+
         # ── 6. Data Health Score ──
         sec("Data Health Score")
- 
-        total_cells  = df.shape[0] * df.shape[1]
+
+        total_cells     = df.shape[0] * df.shape[1]
         missing_pct_val = (df.isnull().sum().sum() / total_cells) * 100
         dup_pct_val     = (df.duplicated().sum() / len(df)) * 100
         outlier_total   = sum(r["Outlier Count"] for r in outlier_rows)
         outlier_pct_val = (outlier_total / len(df)) * 100 if len(df) > 0 else 0
- 
+
         missing_score = max(0, 100 - missing_pct_val * 2)
         dup_score     = max(0, 100 - dup_pct_val * 3)
         outlier_score = max(0, 100 - outlier_pct_val * 1.5)
         health_score  = round(missing_score * 0.4 + dup_score * 0.3 + outlier_score * 0.3, 1)
- 
+
         if health_score >= 80:
             score_color, score_label = "#22c55e", "Excellent"
         elif health_score >= 60:
             score_color, score_label = "#f59e0b", "Fair"
         else:
             score_color, score_label = "#ef4444", "Poor"
- 
+
         st.markdown(f"""
         <div style="background:#0d1117;border:1px solid #151c28;border-radius:12px;
                     padding:1.4rem 1.6rem;margin-bottom:1rem;">
@@ -528,17 +562,17 @@ if file is not None:
             </div>
         </div>
         """, unsafe_allow_html=True)
- 
+
         sc1, sc2, sc3 = st.columns(3)
-        sc1.metric("Missing Score",   f"{round(missing_score,1)}/100",
+        sc1.metric("Missing Score",   f"{round(missing_score, 1)}/100",
                    f"{missing_pct_val:.1f}% missing")
-        sc2.metric("Duplicate Score", f"{round(dup_score,1)}/100",
+        sc2.metric("Duplicate Score", f"{round(dup_score, 1)}/100",
                    f"{dup_pct_val:.1f}% duplicates")
-        sc3.metric("Outlier Score",   f"{round(outlier_score,1)}/100",
+        sc3.metric("Outlier Score",   f"{round(outlier_score, 1)}/100",
                    f"{outlier_pct_val:.1f}% outliers")
- 
+
         divider()
- 
+
         # ── 7. Outlier Detection Table ──
         sec("Outlier Detection (IQR Method)")
         if not numeric_cols:
@@ -556,7 +590,6 @@ if file is not None:
             st.dataframe(outlier_df, use_container_width=True)
 
 
-
     # ================= TAB 2 — COLUMN ANALYSER =================
     with eda_tab2:
  
@@ -568,265 +601,273 @@ if file is not None:
                 "<hr style='border:none;border-top:1px solid #0f1520;margin:1.4rem 0;'>",
                 unsafe_allow_html=True,
             )
- 
+
+        df = st.session_state.df
+
         # ── Column selector ──
-        column = st.selectbox("Select Column", df.columns, key="ml_col_analyzer")
-        divider()
- 
-        # ── Top metrics (all column types) ──
-        colA, colB, colC, colD = st.columns(4)
-        colA.metric("Data Type",      str(df[column].dtype))
-        colB.metric("Missing Values", int(df[column].isnull().sum()))
-        colC.metric("Missing %",      f"{(df[column].isnull().sum() / len(df)) * 100:.2f}%")
-        colD.metric("Unique Values",  int(df[column].nunique()))
-        divider()
- 
-        # ══════════════════════════════════════════
-        #  NUMERIC BRANCH
-        # ══════════════════════════════════════════
-        if pd.api.types.is_numeric_dtype(df[column]):
- 
-            series     = df[column].dropna()
-            mean_val   = series.mean()
-            median_val = series.median()
-            std_val    = series.std()
-            min_val    = series.min()
-            max_val    = series.max()
-            skew_val   = series.skew()
-            kurt_val   = series.kurt()
- 
-            # ── Core stats ──
-            sec("Descriptive Statistics")
-            colE, colF, colG = st.columns(3)
-            colE.metric("Mean",    round(mean_val, 4))
-            colF.metric("Median",  round(median_val, 4))
-            colG.metric("Std Dev", round(std_val, 4))
- 
-            colH, colI, colJ = st.columns(3)
-            colH.metric("Min",      round(min_val, 4))
-            colI.metric("Max",      round(max_val, 4))
-            colJ.metric("Skewness", round(skew_val, 4))
- 
-            # ── Percentile table ──
-            percentiles = series.quantile([0.05, 0.25, 0.50, 0.75, 0.95]).round(4)
-            pct_df = pd.DataFrame({
-                "Percentile": ["P5", "P25 (Q1)", "P50 (Median)", "P75 (Q3)", "P95"],
-                "Value":      percentiles.values
-            })
-            st.dataframe(pct_df, use_container_width=True, hide_index=True)
-            divider()
- 
-            # ── Distribution Interpretation ──
-            sec("Distribution Interpretation")
- 
-            if skew_val > 1:
-                skew_label, skew_color = "Highly Right Skewed",         "#ef4444"
-            elif skew_val > 0.5:
-                skew_label, skew_color = "Moderately Right Skewed",     "#f59e0b"
-            elif skew_val < -1:
-                skew_label, skew_color = "Highly Left Skewed",          "#ef4444"
-            elif skew_val < -0.5:
-                skew_label, skew_color = "Moderately Left Skewed",      "#f59e0b"
-            else:
-                skew_label, skew_color = "Approximately Symmetric",     "#22c55e"
- 
-            if kurt_val > 3:
-                kurt_label = "Leptokurtic — heavy tails, sharp peak (outliers likely)"
-                kurt_color = "#ef4444"
-            elif kurt_val < -1:
-                kurt_label = "Platykurtic — light tails, flat distribution"
-                kurt_color = "#f59e0b"
-            else:
-                kurt_label = "Mesokurtic — normal-like tails"
-                kurt_color = "#22c55e"
- 
-            interp_l, interp_r = st.columns(2)
-            interp_l.markdown(f"""
-            <div style="background:#0d1117;border:1px solid #1e293b;border-left:3px solid {skew_color};
-                        border-radius:10px;padding:0.85rem 1rem;">
-                <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:#64748b;
-                            text-transform:uppercase;letter-spacing:0.2em;margin-bottom:0.4rem;">
-                    Skewness · {round(skew_val, 3)}
-                </div>
-                <div style="font-size:0.78rem;color:{skew_color};">{skew_label}</div>
+        if len(df.columns) == 0:
+            st.markdown("""
+            <div class="banner banner-err">
+                ✕ &nbsp;<span>No columns remaining — 
+                <strong>Reset to Original</strong> in the 
+                Fill Missing Values tab to restore the dataset.</span>
             </div>
             """, unsafe_allow_html=True)
- 
-            interp_r.markdown(f"""
-            <div style="background:#0d1117;border:1px solid #1e293b;border-left:3px solid {kurt_color};
-                        border-radius:10px;padding:0.85rem 1rem;">
-                <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:#64748b;
-                            text-transform:uppercase;letter-spacing:0.2em;margin-bottom:0.4rem;">
-                    Kurtosis · {round(kurt_val, 3)}
-                </div>
-                <div style="font-size:0.78rem;color:{kurt_color};">{kurt_label}</div>
-            </div>
-            """, unsafe_allow_html=True)
+        
+        else:
+            column = st.selectbox("Select Column", df.columns, key="ml_col_analyzer")
             divider()
- 
-            # ── Charts ──
-            sec("Visualisations")
-            plot_series = (
-                series
-                if len(series) <= 5000
-                else series.sample(5000, random_state=42)
-            )
-
-            plot_series = plot_series.dropna()
-
-            if plot_series.nunique() < 2:
-                st.markdown("""
-                <div class="banner banner-warn">
-                    ⚠ &nbsp;<span>Not enough variation for KDE/distribution plotting.</span>
+    
+            # ── Top metrics (all column types) ──
+            colA, colB, colC, colD = st.columns(4)
+            colA.metric("Data Type",      str(df[column].dtype))
+            colB.metric("Missing Values", int(df[column].isnull().sum()))
+            colC.metric("Missing %",      f"{(df[column].isnull().sum() / len(df)) * 100:.2f}%")
+            colD.metric("Unique Values",  int(df[column].nunique()))
+            divider()
+    
+            #  NUMERIC BRANCH
+            if pd.api.types.is_numeric_dtype(df[column]):
+    
+                series     = df[column].dropna()
+                mean_val   = series.mean()
+                median_val = series.median()
+                std_val    = series.std()
+                min_val    = series.min()
+                max_val    = series.max()
+                skew_val   = series.skew()
+                kurt_val   = series.kurt()
+    
+                # ── Core stats ──
+                sec("Descriptive Statistics")
+                colE, colF, colG = st.columns(3)
+                colE.metric("Mean",    round(mean_val, 4))
+                colF.metric("Median",  round(median_val, 4))
+                colG.metric("Std Dev", round(std_val, 4))
+    
+                colH, colI, colJ = st.columns(3)
+                colH.metric("Min",      round(min_val, 4))
+                colI.metric("Max",      round(max_val, 4))
+                colJ.metric("Skewness", round(skew_val, 4))
+    
+                # ── Percentile table ──
+                percentiles = series.quantile([0.05, 0.25, 0.50, 0.75, 0.95]).round(4)
+                pct_df = pd.DataFrame({
+                    "Percentile": ["P5", "P25 (Q1)", "P50 (Median)", "P75 (Q3)", "P95"],
+                    "Value":      percentiles.values
+                })
+                st.dataframe(pct_df, use_container_width=True, hide_index=True)
+                divider()
+    
+                # ── Distribution Interpretation ──
+                sec("Distribution Interpretation")
+    
+                if skew_val > 1:
+                    skew_label, skew_color = "Highly Right Skewed",         "#ef4444"
+                elif skew_val > 0.5:
+                    skew_label, skew_color = "Moderately Right Skewed",     "#f59e0b"
+                elif skew_val < -1:
+                    skew_label, skew_color = "Highly Left Skewed",          "#ef4444"
+                elif skew_val < -0.5:
+                    skew_label, skew_color = "Moderately Left Skewed",      "#f59e0b"
+                else:
+                    skew_label, skew_color = "Approximately Symmetric",     "#22c55e"
+    
+                if kurt_val > 3:
+                    kurt_label = "Leptokurtic — heavy tails, sharp peak (outliers likely)"
+                    kurt_color = "#ef4444"
+                elif kurt_val < -1:
+                    kurt_label = "Platykurtic — light tails, flat distribution"
+                    kurt_color = "#f59e0b"
+                else:
+                    kurt_label = "Mesokurtic — normal-like tails"
+                    kurt_color = "#22c55e"
+    
+                interp_l, interp_r = st.columns(2)
+                interp_l.markdown(f"""
+                <div style="background:#0d1117;border:1px solid #1e293b;border-left:3px solid {skew_color};
+                            border-radius:10px;padding:0.85rem 1rem;">
+                    <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:#64748b;
+                                text-transform:uppercase;letter-spacing:0.2em;margin-bottom:0.4rem;">
+                        Skewness · {round(skew_val, 3)}
+                    </div>
+                    <div style="font-size:0.78rem;color:{skew_color};">{skew_label}</div>
                 </div>
                 """, unsafe_allow_html=True)
+    
+                interp_r.markdown(f"""
+                <div style="background:#0d1117;border:1px solid #1e293b;border-left:3px solid {kurt_color};
+                            border-radius:10px;padding:0.85rem 1rem;">
+                    <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:#64748b;
+                                text-transform:uppercase;letter-spacing:0.2em;margin-bottom:0.4rem;">
+                        Kurtosis · {round(kurt_val, 3)}
+                    </div>
+                    <div style="font-size:0.78rem;color:{kurt_color};">{kurt_label}</div>
+                </div>
+                """, unsafe_allow_html=True)
+                divider()
+    
+                # ── Charts ──
+                sec("Visualisations")
+                plot_series = (
+                    series
+                    if len(series) <= 5000
+                    else series.sample(5000, random_state=42)
+                )
 
+                plot_series = plot_series.dropna()
+
+                if plot_series.nunique() < 2:
+                    st.markdown("""
+                    <div class="banner banner-warn">
+                        ⚠ &nbsp;<span>Not enough variation for KDE/distribution plotting.</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                else:
+                    chart_l, chart_r = st.columns(2)
+                    with chart_l:
+                        st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
+                                    'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
+                                    'margin-bottom:0.5rem;">Distribution + KDE</p>',
+                                    unsafe_allow_html=True)
+                        fig1 = make_num_plots(plot_series.tolist(), column, mean_val, median_val)
+                        st.pyplot(fig1)
+                        download_chart(fig1, key="ml_hist_download")
+                        plt.close(fig1)
+        
+                    with chart_r:
+                        st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
+                                    'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
+                                    'margin-bottom:0.5rem;">Box Plot</p>',
+                                    unsafe_allow_html=True)
+                        fig2 = make_box_plot(plot_series.tolist(), column)
+                        st.pyplot(fig2)
+                        download_chart(fig2, key="ml_box_download")
+                        plt.close(fig2)
+    
+                divider()
+    
+                # ── Outlier Detection (IQR) ──
+                sec("Outlier Detection (IQR Method)")
+    
+                q1, q3   = series.quantile(0.25), series.quantile(0.75)
+                iqr      = q3 - q1
+                lower_b  = q1 - 1.5 * iqr         
+                upper_b  = q3 + 1.5 * iqr
+                out_mask = (df[column] < lower_b) | (df[column] > upper_b)
+                out_df   = df[out_mask]             
+    
+                oc1, oc2, oc3 = st.columns(3)
+                oc1.metric("Lower Bound",  round(lower_b, 3))
+                oc2.metric("Upper Bound",  round(upper_b, 3))
+                oc3.metric("Outlier Rows", len(out_df))
+    
+                if out_df.empty:
+                    st.markdown("""
+                    <div class="banner banner-ok">
+                        ✓ &nbsp;<span>No outliers found in this column.</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    preview_n = min(50, len(out_df))
+                    with st.expander(f"Preview {preview_n} Outlier Rows"):
+                        st.dataframe(out_df.head(50), use_container_width=True)
+                        if len(out_df) > 50:
+                            st.caption(f"Showing 50 of {len(out_df)} outlier rows.")
+    
+            #  CATEGORICAL BRANCH
             else:
+                vc = df[column].value_counts()
+    
+                mode_val      = df[column].mode()
+                most_frequent = mode_val[0] if not mode_val.empty else "N/A"
+                top_count     = int(vc.iloc[0]) if not vc.empty else 0
+    
+                colE, colF = st.columns(2)
+                colE.metric("Most Frequent Value", str(most_frequent))
+                colF.metric("Top Value Count",     top_count)
+                divider()
+    
+                # ── Value Distribution table ──
+                sec("Value Distribution")
+                vc_table = pd.DataFrame({
+                    "Value"      : vc.index,
+                    "Count"      : vc.values,
+                    "Percentage" : (vc.values / len(df) * 100).round(2)
+                })
+                vc_table["Percentage"] = vc_table["Percentage"].astype(str) + " %"
+                st.dataframe(vc_table, use_container_width=True, hide_index=True)
+                divider()
+    
+                # ── Charts ──
+                MAX_BARS  = 20
+                vc_plot   = vc.head(MAX_BARS)
+                truncated = len(vc) > MAX_BARS
+    
+                sec(f"Top {MAX_BARS} Values" if truncated else "Value Counts")
                 chart_l, chart_r = st.columns(2)
+    
                 with chart_l:
                     st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
                                 'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
-                                'margin-bottom:0.5rem;">Distribution + KDE</p>',
+                                'margin-bottom:0.5rem;">Bar Chart</p>',
                                 unsafe_allow_html=True)
-                    fig1 = make_num_plots(plot_series.tolist(), column, mean_val, median_val)
-                    st.pyplot(fig1)
-                    download_chart(fig1, key="ml_hist_download")
-                    plt.close(fig1)
+                    fig, ax = plt.subplots(figsize=(5, max(3, len(vc_plot) * 0.35)))
+                    fig.patch.set_facecolor("#080b10")
+                    ax.set_facecolor("#080b10")
+                    bar_colors = ["#3b82f6" if i == 0 else "#1e293b"
+                                for i in range(len(vc_plot))]
+                    ax.barh(vc_plot.index[::-1], vc_plot.values[::-1],
+                            color=bar_colors[::-1], edgecolor="none")
+                    ax.set_xlabel("Count", color="#64748b", fontsize=8)
+                    ax.tick_params(colors="#64748b", labelsize=7)
+                    for s in ax.spines.values():
+                        s.set_visible(False)
+                    ax.xaxis.grid(True, color="#151c28", linewidth=0.5)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    download_chart(fig, key="ml_bar_download")
+                    plt.close(fig)
     
                 with chart_r:
-                    st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
-                                'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
-                                'margin-bottom:0.5rem;">Box Plot</p>',
+                    if len(vc) <= 10:
+                        pie_label = "Distribution"
+                        pie_data  = vc
+                    else:
+                        pie_label = "Top 10 Share"
+                        top10     = vc.head(10)
+                        other_sum = vc.iloc[10:].sum()
+                        pie_data  = pd.concat([top10, pd.Series({"Other": other_sum})])
+    
+                    st.markdown(f'<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
+                                f'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
+                                f'margin-bottom:0.5rem;">{pie_label}</p>',
                                 unsafe_allow_html=True)
-                    fig2 = make_box_plot(plot_series.tolist(), column)
-                    st.pyplot(fig2)
-                    download_chart(fig2, key="ml_box_download")
-                    plt.close(fig2)
- 
-            divider()
- 
-            # ── Outlier Detection (IQR) ──
-            sec("Outlier Detection (IQR Method)")
- 
-            q1, q3   = series.quantile(0.25), series.quantile(0.75)
-            iqr      = q3 - q1
-            lower_b  = q1 - 1.5 * iqr          # renamed → no clash with Tab 1
-            upper_b  = q3 + 1.5 * iqr
-            out_mask = (df[column] < lower_b) | (df[column] > upper_b)
-            out_df   = df[out_mask]             # renamed from outlier_rows → out_df
- 
-            oc1, oc2, oc3 = st.columns(3)
-            oc1.metric("Lower Bound",  round(lower_b, 3))
-            oc2.metric("Upper Bound",  round(upper_b, 3))
-            oc3.metric("Outlier Rows", len(out_df))
- 
-            if out_df.empty:
-                st.markdown("""
-                <div class="banner banner-ok">
-                    ✓ &nbsp;<span>No outliers found in this column.</span>
-                </div>
-                """, unsafe_allow_html=True)
-            else:
-                preview_n = min(50, len(out_df))
-                with st.expander(f"Preview {preview_n} Outlier Rows"):
-                    st.dataframe(out_df.head(50), use_container_width=True)
-                    if len(out_df) > 50:
-                        st.caption(f"Showing 50 of {len(out_df)} outlier rows.")
- 
-        # ══════════════════════════════════════════
-        #  CATEGORICAL BRANCH
-        # ══════════════════════════════════════════
-        else:
-            vc = df[column].value_counts()
- 
-            mode_val      = df[column].mode()
-            most_frequent = mode_val[0] if not mode_val.empty else "N/A"
-            top_count     = int(vc.iloc[0]) if not vc.empty else 0
- 
-            colE, colF = st.columns(2)
-            colE.metric("Most Frequent Value", str(most_frequent))
-            colF.metric("Top Value Count",     top_count)
-            divider()
- 
-            # ── Value Distribution table ──
-            sec("Value Distribution")
-            vc_table = pd.DataFrame({
-                "Value"      : vc.index,
-                "Count"      : vc.values,
-                "Percentage" : (vc.values / len(df) * 100).round(2)
-            })
-            vc_table["Percentage"] = vc_table["Percentage"].astype(str) + " %"
-            st.dataframe(vc_table, use_container_width=True, hide_index=True)
-            divider()
- 
-            # ── Charts ──
-            MAX_BARS  = 20
-            vc_plot   = vc.head(MAX_BARS)
-            truncated = len(vc) > MAX_BARS
- 
-            sec(f"Top {MAX_BARS} Values" if truncated else "Value Counts")
-            chart_l, chart_r = st.columns(2)
- 
-            with chart_l:
-                st.markdown('<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
-                            'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
-                            'margin-bottom:0.5rem;">Bar Chart</p>',
-                            unsafe_allow_html=True)
-                fig, ax = plt.subplots(figsize=(5, max(3, len(vc_plot) * 0.35)))
-                fig.patch.set_facecolor("#080b10")
-                ax.set_facecolor("#080b10")
-                bar_colors = ["#3b82f6" if i == 0 else "#1e293b"
-                              for i in range(len(vc_plot))]
-                ax.barh(vc_plot.index[::-1], vc_plot.values[::-1],
-                        color=bar_colors[::-1], edgecolor="none")
-                ax.set_xlabel("Count", color="#64748b", fontsize=8)
-                ax.tick_params(colors="#64748b", labelsize=7)
-                for s in ax.spines.values():
-                    s.set_visible(False)
-                ax.xaxis.grid(True, color="#151c28", linewidth=0.5)
-                plt.tight_layout()
-                st.pyplot(fig)
-                download_chart(fig, key="ml_bar_download")
-                plt.close(fig)
- 
-            with chart_r:
-                if len(vc) <= 10:
-                    pie_label = "Distribution"
-                    pie_data  = vc
-                else:
-                    pie_label = "Top 10 Share"
-                    top10     = vc.head(10)
-                    other_sum = vc.iloc[10:].sum()
-                    pie_data  = pd.concat([top10, pd.Series({"Other": other_sum})])
- 
-                st.markdown(f'<p style="font-family:\'DM Mono\',monospace;font-size:0.63rem;'
-                            f'text-transform:uppercase;letter-spacing:0.2em;color:#64748b;'
-                            f'margin-bottom:0.5rem;">{pie_label}</p>',
-                            unsafe_allow_html=True)
- 
-                pie_colors = ["#3b82f6","#60a5fa","#22c55e","#f59e0b",
-                              "#f472b6","#a78bfa","#38bdf8","#4ade80",
-                              "#fb923c","#f87171","#94a3b8"]
- 
-                fig, ax = plt.subplots(figsize=(4, 4))
-                fig.patch.set_facecolor("#080b10")
-                ax.set_facecolor("#080b10")
-                wedges, texts, autotexts = ax.pie(
-                    pie_data.values,
-                    labels=pie_data.index,
-                    colors=pie_colors[:len(pie_data)],
-                    autopct="%1.1f%%",
-                    startangle=140,
-                    textprops={"color": "#64748b", "fontsize": 7},
-                    wedgeprops={"edgecolor": "#080b10", "linewidth": 1.5},
-                )
-                for at in autotexts:
-                    at.set_color("#e2e8f0")
-                    at.set_fontsize(7)
-                plt.tight_layout()
-                st.pyplot(fig)
-                download_chart(fig, key="ml_pie_download")
-                plt.close(fig)
+    
+                    pie_colors = ["#3b82f6","#60a5fa","#22c55e","#f59e0b",
+                                "#f472b6","#a78bfa","#38bdf8","#4ade80",
+                                "#fb923c","#f87171","#94a3b8"]
+    
+                    fig, ax = plt.subplots(figsize=(4, 4))
+                    fig.patch.set_facecolor("#080b10")
+                    ax.set_facecolor("#080b10")
+                    wedges, texts, autotexts = ax.pie(
+                        pie_data.values,
+                        labels=pie_data.index,
+                        colors=pie_colors[:len(pie_data)],
+                        autopct="%1.1f%%",
+                        startangle=140,
+                        textprops={"color": "#64748b", "fontsize": 7},
+                        wedgeprops={"edgecolor": "#080b10", "linewidth": 1.5},
+                    )
+                    for at in autotexts:
+                        at.set_color("#e2e8f0")
+                        at.set_fontsize(7)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    download_chart(fig, key="ml_pie_download")
+                    plt.close(fig)
 
 
 
@@ -972,40 +1013,43 @@ if file is not None:
         sec("Rename a Column")
         df = st.session_state.df
  
-        rn1, rn2, rn3 = st.columns([2, 2, 1])
-        with rn1:
-            rename_col = st.selectbox(
-                "Select Column",
-                df.columns.tolist(),
-                key="ml_rename_col",
-            )
-        with rn2:
-            new_name = st.text_input(
-                "New Name",
-                placeholder="Enter new column name",
-                key="ml_rename_new",
-            )
-        with rn3:
-            st.markdown("<br>", unsafe_allow_html=True)
-            rename_btn = st.button("Rename", key="ml_rename_btn")
+        if len(df.columns) == 0:
+            banner("No columns remaining to rename.", "warn")
+        else:
+            rn1, rn2, rn3 = st.columns([2, 2, 1])
+            with rn1:
+                rename_col = st.selectbox(
+                    "Select Column",
+                    df.columns.tolist(),
+                    key="ml_rename_col",
+                )
+            with rn2:
+                new_name = st.text_input(
+                    "New Name",
+                    placeholder="Enter new column name",
+                    key="ml_rename_new",
+                )
+            with rn3:
+                st.markdown("<br>", unsafe_allow_html=True)
+                rename_btn = st.button("Rename", key="ml_rename_btn")
  
-        if rename_btn:
-            stripped = new_name.strip()
-            if not stripped:
-                banner("New column name cannot be empty.", "err")
-            elif stripped in df.columns and stripped != rename_col:
-                banner(f"Column <strong>{stripped}</strong> already exists.", "err")
-            else:
-                st.session_state.setdefault("tab3_history", []).append(
-                    st.session_state.df.copy()
-                )
-                st.session_state.df = st.session_state.df.rename(
-                    columns={rename_col: stripped}
-                )
-                st.session_state["last_action"] = (
-                    f"<strong>{rename_col}</strong> renamed to <strong>{stripped}</strong>"
-                )
-                st.rerun()
+            if rename_btn:
+                stripped = new_name.strip()
+                if not stripped:
+                    banner("New column name cannot be empty.", "err")
+                elif stripped in df.columns and stripped != rename_col:
+                    banner(f"Column <strong>{stripped}</strong> already exists.", "err")
+                else:
+                    st.session_state.setdefault("tab3_history", []).append(
+                        st.session_state.df.copy()
+                    )
+                    st.session_state.df = st.session_state.df.rename(
+                        columns={rename_col: stripped}
+                    )
+                    st.session_state["last_action"] = (
+                        f"<strong>{rename_col}</strong> renamed to <strong>{stripped}</strong>"
+                    )
+                    st.rerun()
  
         divider()
  
@@ -1013,24 +1057,31 @@ if file is not None:
         sec("Delete a Column")
         df = st.session_state.df
  
-        dc1, dc2 = st.columns([3, 1])
-        with dc1:
-            del_col = st.selectbox(
-                "Select Column to Delete",
-                df.columns.tolist(),
-                key="ml_fill_del_col",
+        if len(df.columns) == 0:
+            banner(
+                "No columns remaining — use <strong>↺ Reset to Original</strong> "
+                "below to restore the dataset.",
+                "warn",
             )
-        with dc2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Delete", key="ml_fill_del_btn"):
-                st.session_state.setdefault("tab3_history", []).append(
-                    st.session_state.df.copy()
+        else:
+            dc1, dc2 = st.columns([3, 1])
+            with dc1:
+                del_col = st.selectbox(
+                    "Select Column to Delete",
+                    df.columns.tolist(),
+                    key="ml_fill_del_col",
                 )
-                st.session_state.df = st.session_state.df.drop(columns=[del_col])
-                st.session_state["last_action"] = (
-                    f"Column <strong>{del_col}</strong> deleted"
-                )
-                st.rerun()
+            with dc2:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("Delete", key="ml_fill_del_btn"):
+                    st.session_state.setdefault("tab3_history", []).append(
+                        st.session_state.df.copy()
+                    )
+                    st.session_state.df = st.session_state.df.drop(columns=[del_col])
+                    st.session_state["last_action"] = (
+                        f"Column <strong>{del_col}</strong> deleted"
+                    )
+                    st.rerun()
  
         divider()
  
@@ -1335,15 +1386,16 @@ if file is not None:
 
     # ================= TAB 5 — FEATURE IMPORTANCE =================
     with eda_tab5:
+ 
         def sec(title):
             st.markdown(f'<div class="sec-label">{title}</div>', unsafe_allow_html=True)
-
+ 
         def divider():
             st.markdown(
-                "<hr style='border:none;border-top:1px solid #151c28;margin:1.6rem 0;'>",
+                "<hr style='border:none;border-top:1px solid #0f1520;margin:1.6rem 0;'>",
                 unsafe_allow_html=True,
             )
-
+ 
         def banner(msg, kind="ok"):
             icons = {"ok": "✓", "warn": "⚠", "err": "✕"}
             st.markdown(
@@ -1351,91 +1403,100 @@ if file is not None:
                 f'{icons[kind]} &nbsp;<span>{msg}</span></div>',
                 unsafe_allow_html=True,
             )
-
-        df = st.session_state.df
-
+ 
+        df          = st.session_state.df
         non_numeric = df.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
-
+        num_cols    = df.select_dtypes(include=np.number).columns.tolist()
+ 
+        # ── Guards (no st.stop) ──
         if non_numeric:
             banner(
                 f"Please encode these columns first in the <strong>Encoding</strong> tab: "
                 f"<code>{'</code>, <code>'.join(non_numeric)}</code>",
                 "warn",
             )
-
+        elif len(num_cols) < 2:
+            banner(
+                "At least <strong>2 numeric columns</strong> are required to run "
+                "Feature Importance.",
+                "warn",
+            )
         else:
-            num_cols = df.select_dtypes(include=np.number).columns.tolist()
-
-            if len(num_cols) < 2:
-                banner("At least 2 numeric columns are required to run Feature Importance.", "warn")
-
-            else:
-                # ── 1. Configuration ──
-                sec("Configuration")
-
-                cfg1, cfg2 = st.columns(2)
-                with cfg1:
-                    target_col = st.selectbox(
-                        "Select Target Column (Y)", num_cols, key="fi_target"
-                    )
-                feature_cols = [c for c in num_cols if c != target_col]
-
-                MAX_ROWS = 20_000
-                is_large = len(df) > MAX_ROWS
-
-                with cfg2:
-                    n_estimators = st.slider(
-                        "Number of Trees", min_value=50, max_value=500,
-                        value=100, step=50, key="fi_n_est"
-                    )
-
-                target_unique = df[target_col].nunique()
-                is_classifier = target_unique <= 10
-                model_label   = "Classifier" if is_classifier else "Regressor"
-                model_color   = "#f59e0b" if is_classifier else "#3b82f6"
-
-                st.markdown(
-                    f'<div style="background:#0d1117;border:1px solid #151c28;border-radius:8px;'
-                    f'padding:0.65rem 1rem;font-family:\'DM Mono\',monospace;font-size:0.72rem;'
-                    f'color:#64748b;margin:0.5rem 0 0.4rem 0;">'
-                    f'Auto-detected model &nbsp;→&nbsp; '
-                    f'<span style="color:{model_color};font-weight:600;">'
-                    f'Random Forest {model_label}</span>'
-                    f'&nbsp;&nbsp;·&nbsp;&nbsp;'
-                    f'<span style="color:#e2e8f0;">{len(feature_cols)}</span> features'
-                    f'&nbsp;&nbsp;·&nbsp;&nbsp;'
-                    f'<span style="color:#e2e8f0;">{target_unique}</span> unique target values'
-                    f'</div>',
-                    unsafe_allow_html=True,
+            # ── 1. Configuration ──
+            sec("Configuration")
+ 
+            cfg1, cfg2 = st.columns(2)
+            with cfg1:
+                target_col = st.selectbox(
+                    "Select Target Column (Y)", num_cols, key="fi_target"
                 )
-
-                if is_large:
-                    banner(
-                        f"Large dataset ({len(df):,} rows) — Feature Importance will use "
-                        f"{MAX_ROWS:,} random samples for speed.",
-                        "warn",
-                    )
-
+            feature_cols = [c for c in num_cols if c != target_col]
+ 
+            MAX_ROWS  = 20_000
+            is_large  = len(df) > MAX_ROWS
+ 
+            with cfg2:
+                n_estimators = st.slider(
+                    "Number of Trees", min_value=50, max_value=500,
+                    value=100, step=50, key="fi_n_est",
+                )
+ 
+            target_unique = df[target_col].nunique()
+            is_classifier = target_unique <= 10
+            model_label   = "Classifier" if is_classifier else "Regressor"
+            model_color   = "#f59e0b" if is_classifier else "#3b82f6"
+ 
+            st.markdown(
+                f'<div style="background:#0d1117;border:1px solid #151c28;border-radius:8px;'
+                f'padding:0.65rem 1rem;font-family:\'DM Mono\',monospace;font-size:0.72rem;'
+                f'color:#64748b;margin:0.5rem 0 0.4rem 0;">'
+                f'Auto-detected &nbsp;→&nbsp; '
+                f'<span style="color:{model_color};font-weight:600;">'
+                f'Random Forest {model_label}</span>'
+                f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+                f'<span style="color:#e2e8f0;">{len(feature_cols)}</span> features'
+                f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+                f'<span style="color:#e2e8f0;">{target_unique}</span> unique target values'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+ 
+            if is_large:
+                banner(
+                    f"Large dataset ({len(df):,} rows) — will use "
+                    f"{MAX_ROWS:,} random samples for speed.",
+                    "warn",
+                )
+ 
+            # edge case: only 1 feature col
+            if len(feature_cols) == 0:
+                banner(
+                    "Only 1 numeric column in dataset — need at least "
+                    "<strong>2 columns</strong> (1 feature + 1 target).",
+                    "err",
+                )
+            else:
                 divider()
-
+ 
                 # ── 2. Run ──
                 sec("Run Feature Importance")
-
+ 
                 if st.button("▶  Run Feature Importance", key="fi_btn"):
                     data = df[feature_cols + [target_col]].dropna()
-
+ 
                     if data.shape[0] < 10:
                         banner(
-                            "Not enough clean rows after dropping missing values (need ≥ 10).",
+                            "Not enough clean rows after dropping missing values "
+                            "(need ≥ 10).",
                             "err",
                         )
                     else:
                         if len(data) > MAX_ROWS:
                             data = data.sample(MAX_ROWS, random_state=42)
-
+ 
                         X = data[feature_cols]
                         y = data[target_col]
-
+ 
                         with st.spinner("Training Random Forest… this may take a moment."):
                             if is_classifier:
                                 from sklearn.ensemble import RandomForestClassifier
@@ -1448,37 +1509,38 @@ if file is not None:
                                     n_estimators=n_estimators, random_state=42, n_jobs=-1
                                 )
                             model.fit(X, y)
-
+ 
                         importance_df = pd.DataFrame({
                             "Feature"         : feature_cols,
                             "Importance Score": np.round(model.feature_importances_, 4),
-                            "Rank"            : range(1, len(feature_cols) + 1),
                         }).sort_values("Importance Score", ascending=False).reset_index(drop=True)
                         importance_df["Rank"]         = range(1, len(importance_df) + 1)
                         importance_df["Cumulative %"] = (
                             importance_df["Importance Score"].cumsum() * 100
                         ).round(2)
-
+ 
                         st.session_state["importance_df"]  = importance_df
                         st.session_state["fi_target_used"] = target_col
                         st.session_state["fi_model_label"] = model_label
                         st.session_state["fi_rows_used"]   = len(data)
-
+ 
                 # ── 3. Results ──
                 if "importance_df" in st.session_state:
                     importance_df = st.session_state["importance_df"]
                     divider()
-
-                    sec(f"Results — Target: {st.session_state['fi_target_used']}  "
-                        f"({st.session_state['fi_model_label']})")
-
+ 
+                    sec(
+                        f"Results — Target: {st.session_state['fi_target_used']}  "
+                        f"({st.session_state['fi_model_label']})"
+                    )
+ 
+                    # top-3 cards
                     top_n     = min(3, len(importance_df))
                     card_cols = st.columns(top_n)
                     medal     = ["🥇", "🥈", "🥉"]
-
-                    for i, col in enumerate(card_cols):
+                    for i, st_col in enumerate(card_cols):
                         row = importance_df.iloc[i]
-                        col.markdown(
+                        st_col.markdown(
                             f'<div style="background:#0d1117;border:1px solid #151c28;'
                             f'border-top:3px solid #3b82f6;border-radius:10px;'
                             f'padding:0.9rem 1rem;text-align:center;">'
@@ -1493,9 +1555,9 @@ if file is not None:
                             f'</div>',
                             unsafe_allow_html=True,
                         )
-
+ 
                     st.markdown("<br>", unsafe_allow_html=True)
-
+ 
                     row_height = 35
                     header_h   = 38
                     table_h    = min(600, header_h + len(importance_df) * row_height)
@@ -1505,32 +1567,29 @@ if file is not None:
                         hide_index=True,
                         height=table_h,
                     )
-
+ 
                     rows_used = st.session_state.get("fi_rows_used", "?")
                     st.caption(f"Trained on {rows_used:,} rows · {n_estimators} trees")
-
+ 
                     divider()
-
+ 
                     # ── 4. Chart ──
                     sec("Importance Chart")
-
-                    fig, ax = plt.subplots(
-                        figsize=(8, max(3, len(importance_df) * 0.42))
-                    )
+ 
+                    fig, ax = plt.subplots(figsize=(8, max(3, len(importance_df) * 0.42)))
                     fig.patch.set_facecolor("#0d1117")
                     ax.set_facecolor("#0d1117")
-
+ 
                     n          = len(importance_df)
                     alphas     = np.linspace(1.0, 0.35, n)
                     bar_colors = [(59/255, 130/255, 246/255, a) for a in alphas]
-
+ 
                     bars = ax.barh(
                         importance_df["Feature"][::-1],
                         importance_df["Importance Score"][::-1],
                         color=bar_colors[::-1],
                         edgecolor="none",
                     )
-
                     for bar, val in zip(bars, importance_df["Importance Score"][::-1]):
                         ax.text(
                             bar.get_width() + 0.001,
@@ -1539,7 +1598,7 @@ if file is not None:
                             va="center", ha="left",
                             color="#64748b", fontsize=7,
                         )
-
+ 
                     ax.set_xlabel("Importance Score", color="#64748b", fontsize=8)
                     ax.tick_params(colors="#64748b", labelsize=7)
                     for spine in ax.spines.values():
@@ -1549,12 +1608,12 @@ if file is not None:
                     st.pyplot(fig)
                     download_chart(fig, key="fi_chart_download")
                     plt.close(fig)
-
+ 
                     divider()
-
+ 
                     # ── 5. Download ──
                     sec("Download")
-
+ 
                     dl1, dl2 = st.columns(2)
                     with dl1:
                         csv_data = st.session_state.df.to_csv(index=False).encode("utf-8")
@@ -1597,500 +1656,532 @@ if file is not None:
                 unsafe_allow_html=True,
             )
  
-        df = st.session_state.df
+        df          = st.session_state.df
+        has_missing = df.isnull().sum().sum() > 0
+        non_numeric = df.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
+        too_few_cols = len(df.columns) < 2
  
-        # ── Guards ──
-        if df.isnull().sum().sum() > 0:
+        # ── Guards (no st.stop — if/elif/else) ──
+        if has_missing:
             banner(
                 "Dataset has missing values — handle them in the "
                 "<strong>Fill Missing Values</strong> tab first.",
                 "err",
             )
-            st.stop()
- 
-        non_numeric = df.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
-        if non_numeric:
+        elif non_numeric:
             banner(
                 f"Non-numeric columns found: "
                 f"<code>{'</code>, <code>'.join(non_numeric)}</code> — "
                 f"encode them in the <strong>Encoding</strong> tab first.",
                 "err",
             )
-            st.stop()
- 
-        # bool → int
-        df = df.replace({True: 1, False: 0})
- 
-        MAX_ROWS = 20_000
- 
-        # ── 1. Target + Task Detection ──
-        sec("Target Column")
- 
-        target = st.selectbox("Select Target (Y)", df.columns, key="train_target")
-        X = df.drop(columns=[target])
-        y = df[target]
- 
-        task_type     = "Classification" if (y.dtype == object or y.nunique() <= 15) else "Regression"
-        task_color    = "#f59e0b" if task_type == "Classification" else "#3b82f6"
-        is_large      = len(X) > MAX_ROWS
-        is_highdim    = X.shape[1] > 100
- 
-        st.markdown(
-            f'<div style="background:#0d1117;border:1px solid #151c28;border-radius:8px;'
-            f'padding:0.7rem 1.1rem;font-family:\'DM Mono\',monospace;font-size:0.72rem;'
-            f'color:#64748b;margin:0.5rem 0;">'
-            f'Task &nbsp;→&nbsp; <span style="color:{task_color};font-weight:600;">{task_type}</span>'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;'
-            f'<span style="color:#e2e8f0;">{X.shape[1]}</span> features'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;'
-            f'<span style="color:#e2e8f0;">{len(X):,}</span> rows'
-            f'&nbsp;&nbsp;·&nbsp;&nbsp;'
-            f'<span style="color:#e2e8f0;">{y.nunique()}</span> unique target values'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
- 
-        if is_large:
+        elif too_few_cols:
             banner(
-                f"Large dataset ({len(X):,} rows) — training will use "
-                f"{MAX_ROWS:,} random samples.",
-                "warn",
+                "Dataset needs at least <strong>2 columns</strong> "
+                "(1 feature + 1 target) to train a model.",
+                "err",
             )
-        if is_highdim:
-            banner(
-                f"High-dimensional data ({X.shape[1]} features) — "
-                f"PCA will auto-apply (90% variance retained).",
-                "warn",
-            )
- 
-        divider()
- 
-        # ── 2. Train / Test Split ──
-        sec("Train / Test Split")
-        test_size = st.slider(
-            "Test Set Size", min_value=0.10, max_value=0.40,
-            value=0.20, step=0.05, key="train_test_size",
-            help="Fraction of data held out for evaluation"
-        )
-        train_rows = int(min(len(X), MAX_ROWS) * (1 - test_size))
-        test_rows  = int(min(len(X), MAX_ROWS) * test_size)
-        st.caption(f"~{train_rows:,} training rows  ·  ~{test_rows:,} test rows")
- 
-        divider()
- 
-        # ── 3. Model Selection ──
-        sec("Select Model")
- 
-        if task_type == "Regression":
-            model_list = ["Linear Regression", "KNN", "SVM", "Decision Tree", "Random Forest"]
         else:
-            model_list = ["Logistic Regression", "KNN", "SVM", "Decision Tree", "Random Forest"]
+            # bool → int
+            df = df.replace({True: 1, False: 0})
  
-        model_name = st.selectbox("Model", model_list, key="model_select")
+            MAX_ROWS = 20_000
  
-        # ── 4. Hyperparameter Tuning ──
-        hp = {}
-        hyper_models = ["Decision Tree", "Random Forest", "SVM"]
+            # ── 1. Target + Task Detection ──
+            sec("Target Column")
  
-        if model_name in hyper_models:
-            enable_tuning = st.toggle(
-                "Enable Hyperparameter Tuning",
-                value=False,
-                key="hp_toggle",
-            )
+            target = st.selectbox("Select Target (Y)", df.columns, key="train_target")
+            X = df.drop(columns=[target])
+            y = df[target]
  
-            if enable_tuning:
-                st.markdown("<br>", unsafe_allow_html=True)
- 
-                if model_name == "Decision Tree":
-                    c1, c2, c3 = st.columns(3)
-                    hp["max_depth"] = c1.slider(
-                        "Max Depth", 1, 20, 5,
-                        help="Higher = more complex, risk of overfitting",
-                    )
-                    hp["min_samples_split"] = c2.slider(
-                        "Min Samples Split", 2, 20, 5,
-                        help="Min samples needed to split a node",
-                    )
-                    hp["min_samples_leaf"] = c3.slider(
-                        "Min Samples Leaf", 1, 20, 2,
-                        help="Min samples at a leaf node",
-                    )
-                    st.caption("Tip: Max Depth 3–8 is usually best. Too high → overfitting.")
- 
-                elif model_name == "Random Forest":
-                    c1, c2, c3, c4 = st.columns(4)
-                    hp["n_estimators"] = c1.slider(
-                        "N Estimators", 50, 500, 150, step=50,
-                        help="More trees = better but slower",
-                    )
-                    hp["max_depth"] = c2.slider(
-                        "Max Depth", 1, 20, 7,
-                        help="Max depth of each tree",
-                    )
-                    hp["min_samples_split"] = c3.slider(
-                        "Min Samples Split", 2, 20, 5,
-                    )
-                    hp["min_samples_leaf"] = c4.slider(
-                        "Min Samples Leaf", 1, 20, 2,
-                    )
-                    st.caption("Tip: Start with 100–200 trees. Max Depth 5–10 works well.")
- 
-                elif model_name == "SVM":
-                    c1, c2, c3 = st.columns(3)
-                    hp["C"] = c1.select_slider(
-                        "C (Regularization)",
-                        options=[0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0],
-                        value=1.0,
-                        help="Higher C = less regularization",
-                    )
-                    hp["kernel"] = c2.selectbox(
-                        "Kernel", ["rbf", "linear", "poly", "sigmoid"],
-                        help="rbf works best for most cases",
-                    )
-                    hp["gamma"] = c3.selectbox(
-                        "Gamma", ["scale", "auto"],
-                        help="scale = 1/(n_features * X.var())",
-                    )
-                    st.caption("Tip: rbf kernel with C=1.0 is a safe start.")
- 
+            # guard: no features left after dropping target
+            if X.shape[1] == 0:
+                banner(
+                    "No feature columns left after selecting target — "
+                    "dataset needs at least <strong>2 columns</strong>.",
+                    "err",
+                )
             else:
-                # defaults
-                if model_name == "Decision Tree":
-                    hp = {"max_depth": 5, "min_samples_split": 5, "min_samples_leaf": 2}
-                elif model_name == "Random Forest":
-                    hp = {"n_estimators": 150, "max_depth": 7,
-                          "min_samples_split": 5, "min_samples_leaf": 2}
-                elif model_name == "SVM":
-                    hp = {"C": 1.0, "kernel": "rbf", "gamma": "scale"}
+                task_type  = "Classification" if (y.dtype == object or y.nunique() <= 15) else "Regression"
+                task_color = "#f59e0b" if task_type == "Classification" else "#3b82f6"
+                is_large   = len(X) > MAX_ROWS
+                is_highdim = X.shape[1] > 100
  
-        divider()
- 
-        # ── 5. Train Button ──
-        sec("Train")
- 
-        if st.button("▶  Train Model", key="train_btn"):
-            X_s = X.copy()
-            y_s = y.copy()
- 
-            if len(X_s) > MAX_ROWS:
-                X_s = X_s.sample(MAX_ROWS, random_state=42)
-                y_s = y_s.loc[X_s.index]
- 
-            with st.spinner("Training… please wait."):
-                from sklearn.model_selection import train_test_split, cross_val_score
-                from sklearn.preprocessing   import StandardScaler
-                from sklearn.decomposition   import PCA
-                import time
- 
-                start = time.time()
- 
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X_s, y_s, test_size=test_size, random_state=42
-                )
- 
-                # scaling
-                needs_scale = model_name in [
-                    "KNN", "SVM", "Linear Regression", "Logistic Regression"
-                ]
-                scaler = None
-                if needs_scale or is_highdim:
-                    scaler  = StandardScaler()
-                    X_train = scaler.fit_transform(X_train)
-                    X_test  = scaler.transform(X_test)
-                else:
-                    X_train = X_train.values
-                    X_test  = X_test.values
- 
-                # PCA
-                pca = None
-                pca_n_after = None
-                if is_highdim:
-                    pca         = PCA(n_components=0.90, random_state=42)
-                    X_train     = pca.fit_transform(X_train)
-                    X_test      = pca.transform(X_test)
-                    pca_n_after = X_train.shape[1]
- 
-                # model init
-                if model_name == "Linear Regression":
-                    from sklearn.linear_model import LinearRegression
-                    model = LinearRegression()
- 
-                elif model_name == "Logistic Regression":
-                    from sklearn.linear_model import LogisticRegression
-                    model = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs")
- 
-                elif model_name == "KNN":
-                    from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-                    model = (
-                        KNeighborsClassifier(n_neighbors=5, weights="distance")
-                        if task_type == "Classification"
-                        else KNeighborsRegressor(n_neighbors=5, weights="distance")
-                    )
- 
-                elif model_name == "SVM":
-                    from sklearn.svm import SVC, SVR
-                    model = (
-                        SVC(kernel=hp["kernel"], C=hp["C"], gamma=hp["gamma"], probability=True)
-                        if task_type == "Classification"
-                        else SVR(kernel=hp["kernel"], C=hp["C"], gamma=hp["gamma"])
-                    )
- 
-                elif model_name == "Decision Tree":
-                    from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-                    model = (
-                        DecisionTreeClassifier(
-                            max_depth=hp["max_depth"],
-                            min_samples_split=hp["min_samples_split"],
-                            min_samples_leaf=hp["min_samples_leaf"],
-                            random_state=42,
-                        )
-                        if task_type == "Classification"
-                        else DecisionTreeRegressor(
-                            max_depth=hp["max_depth"],
-                            min_samples_split=hp["min_samples_split"],
-                            min_samples_leaf=hp["min_samples_leaf"],
-                            random_state=42,
-                        )
-                    )
- 
-                else:  # Random Forest
-                    from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-                    model = (
-                        RandomForestClassifier(
-                            n_estimators=hp.get("n_estimators", 150),
-                            max_depth=hp.get("max_depth", 7),
-                            min_samples_split=hp.get("min_samples_split", 5),
-                            min_samples_leaf=hp.get("min_samples_leaf", 2),
-                            random_state=42, n_jobs=-1,
-                        )
-                        if task_type == "Classification"
-                        else RandomForestRegressor(
-                            n_estimators=hp.get("n_estimators", 150),
-                            max_depth=hp.get("max_depth", 7),
-                            min_samples_split=hp.get("min_samples_split", 5),
-                            min_samples_leaf=hp.get("min_samples_leaf", 2),
-                            random_state=42, n_jobs=-1,
-                        )
-                    )
- 
-                model.fit(X_train, y_train)
-                preds = model.predict(X_test)
- 
-                # 5-fold cross-val score on training set
-                cv_scoring = "accuracy" if task_type == "Classification" else "r2"
-                cv_scores  = cross_val_score(
-                    model, X_train, y_train, cv=5, scoring=cv_scoring, n_jobs=-1
-                )
- 
-                elapsed = time.time() - start
- 
-            # save everything
-            st.session_state.update({
-                "trained_model"      : model,
-                "trained_preds"      : preds.tolist(),
-                "trained_y_test"     : y_test.tolist(),
-                "trained_task"       : task_type,
-                "trained_model_name" : model_name,
-                "trained_target"     : target,
-                "trained_features"   : X.columns.tolist(),
-                "trained_pca_n"      : pca_n_after,
-                "trained_hp"         : hp,
-                "train_time"         : elapsed,
-                "train_cv_scores"    : cv_scores.tolist(),
-                "train_cv_metric"    : cv_scoring,
-                "scaler"             : scaler,
-                "pca"                : pca,
-            })
- 
-        # ── 6. Results ──
-        if "trained_model" in st.session_state:
-            preds      = np.array(st.session_state["trained_preds"])
-            y_test_arr = np.array(st.session_state["trained_y_test"])
-            task       = st.session_state["trained_task"]
-            mdl_name   = st.session_state["trained_model_name"]
-            pca_n      = st.session_state["trained_pca_n"]
-            used_hp    = st.session_state.get("trained_hp", {})
-            cv_scores  = np.array(st.session_state.get("train_cv_scores", []))
-            cv_metric  = st.session_state.get("train_cv_metric", "")
- 
-            divider()
-            sec(f"Results — {mdl_name}")
- 
-            if pca_n:
-                banner(f"PCA applied → reduced to <strong>{pca_n}</strong> components (90% variance retained).", "warn")
- 
-            if used_hp:
-                hp_str = " &nbsp;·&nbsp; ".join(
-                    [f'<span style="color:#e2e8f0;">{k}</span>: '
-                     f'<span style="color:#3b82f6;">{v}</span>'
-                     for k, v in used_hp.items()]
-                )
                 st.markdown(
-                    f'<div style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
-                    f'color:#64748b;margin-bottom:0.8rem;">Params — {hp_str}</div>',
+                    f'<div style="background:#0d1117;border:1px solid #151c28;border-radius:8px;'
+                    f'padding:0.7rem 1.1rem;font-family:\'DM Mono\',monospace;font-size:0.72rem;'
+                    f'color:#64748b;margin:0.5rem 0;">'
+                    f'Task &nbsp;→&nbsp; <span style="color:{task_color};font-weight:600;">{task_type}</span>'
+                    f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+                    f'<span style="color:#e2e8f0;">{X.shape[1]}</span> features'
+                    f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+                    f'<span style="color:#e2e8f0;">{len(X):,}</span> rows'
+                    f'&nbsp;&nbsp;·&nbsp;&nbsp;'
+                    f'<span style="color:#e2e8f0;">{y.nunique()}</span> unique target values'
+                    f'</div>',
                     unsafe_allow_html=True,
                 )
  
-            # ── Metrics ──
-            if task == "Regression":
-                from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-                r2   = r2_score(y_test_arr, preds)
-                mse  = mean_squared_error(y_test_arr, preds)
-                rmse = np.sqrt(mse)
-                mae  = mean_absolute_error(y_test_arr, preds)
- 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("R² Score", round(r2,   4))
-                m2.metric("MAE",      round(mae,  4))
-                m3.metric("MSE",      round(mse,  4))
-                m4.metric("RMSE",     round(rmse, 4))
- 
-                # Actual vs Predicted chart
-                divider()
-                sec("Actual vs Predicted")
-                sample_n  = min(200, len(y_test_arr))
-                idx       = np.random.choice(len(y_test_arr), sample_n, replace=False)
-                fig, ax   = plt.subplots(figsize=(7, 3.5))
-                fig.patch.set_facecolor("#0d1117")
-                ax.set_facecolor("#0d1117")
-                ax.scatter(y_test_arr[idx], preds[idx],
-                           color="#3b82f6", alpha=0.55, s=18, edgecolors="none")
-                lims = [min(y_test_arr.min(), preds.min()),
-                        max(y_test_arr.max(), preds.max())]
-                ax.plot(lims, lims, color="#f59e0b", linewidth=1.2,
-                        linestyle="--", label="Perfect fit")
-                ax.set_xlabel("Actual",    color="#64748b", fontsize=8)
-                ax.set_ylabel("Predicted", color="#64748b", fontsize=8)
-                ax.tick_params(colors="#64748b", labelsize=7)
-                ax.legend(fontsize=7, labelcolor="#94a3b8",
-                          facecolor="#0d1117", edgecolor="#1e293b")
-                for s in ax.spines.values():
-                    s.set_visible(False)
-                ax.grid(True, color="#151c28", linewidth=0.5)
-                plt.tight_layout()
-                st.pyplot(fig)
-                download_chart(fig, key="train_avp_download")
-                plt.close(fig)
- 
-            else:
-                from sklearn.metrics import (
-                    accuracy_score, confusion_matrix, classification_report
-                )
-                acc = accuracy_score(y_test_arr, preds)
-                st.metric("Test Accuracy", f"{round(acc * 100, 2)}%")
+                if is_large:
+                    banner(
+                        f"Large dataset ({len(X):,} rows) — training will use "
+                        f"{MAX_ROWS:,} random samples.",
+                        "warn",
+                    )
+                if is_highdim:
+                    banner(
+                        f"High-dimensional data ({X.shape[1]} features) — "
+                        f"PCA will auto-apply (90% variance retained).",
+                        "warn",
+                    )
  
                 divider()
-                sec("Classification Report")
-                report    = classification_report(
-                    y_test_arr, preds, output_dict=True, zero_division=0
+ 
+                # ── 2. Train / Test Split ──
+                sec("Train / Test Split")
+                test_size = st.slider(
+                    "Test Set Size", min_value=0.10, max_value=0.40,
+                    value=0.20, step=0.05, key="train_test_size",
+                    help="Fraction of data held out for evaluation",
                 )
-                report_df = pd.DataFrame(report).transpose().round(3)
-                row_h     = 35
-                tbl_h     = min(500, 38 + len(report_df) * row_h)
-                st.dataframe(report_df, use_container_width=True, height=tbl_h)
+                train_rows = int(min(len(X), MAX_ROWS) * (1 - test_size))
+                test_rows  = int(min(len(X), MAX_ROWS) * test_size)
+                st.caption(f"~{train_rows:,} training rows  ·  ~{test_rows:,} test rows")
  
                 divider()
-                sec("Confusion Matrix")
-                cm       = confusion_matrix(y_test_arr, preds)
-                n_cls    = cm.shape[0]
-                fig_size = max(3, min(7, n_cls * 1.2))
-                fig, ax  = plt.subplots(figsize=(fig_size, fig_size))
-                fig.patch.set_facecolor("#0d1117")
-                ax.set_facecolor("#0d1117")
-                sns.heatmap(
-                    cm, annot=True, fmt="d", cmap="Blues", ax=ax,
-                    linewidths=0.5, linecolor="#161b22",
-                    annot_kws={"size": 9},
-                )
-                ax.set_xlabel("Predicted", color="#64748b", fontsize=8)
-                ax.set_ylabel("Actual",    color="#64748b", fontsize=8)
-                ax.tick_params(colors="#64748b", labelsize=7)
-                for s in ax.spines.values():
-                    s.set_visible(False)
-                plt.tight_layout()
-                _, mid, _ = st.columns([1, 2, 1])
-                with mid:
-                    st.pyplot(fig)
-                    download_chart(fig, key="train_cm_download")
-                plt.close(fig)
  
-            # ── Cross-Validation ──
-            if len(cv_scores) > 0:
+                # ── 3. Model Selection ──
+                sec("Select Model")
+ 
+                if task_type == "Regression":
+                    model_list = ["Linear Regression", "KNN", "SVM", "Decision Tree", "Random Forest"]
+                else:
+                    model_list = ["Logistic Regression", "KNN", "SVM", "Decision Tree", "Random Forest"]
+ 
+                model_name = st.selectbox("Model", model_list, key="model_select")
+ 
+                # ── 4. Hyperparameter Tuning ──
+                hp = {}
+                hyper_models = ["Decision Tree", "Random Forest", "SVM"]
+ 
+                if model_name in hyper_models:
+                    enable_tuning = st.toggle(
+                        "Enable Hyperparameter Tuning",
+                        value=False,
+                        key="hp_toggle",
+                    )
+ 
+                    if enable_tuning:
+                        st.markdown("<br>", unsafe_allow_html=True)
+ 
+                        if model_name == "Decision Tree":
+                            c1, c2, c3 = st.columns(3)
+                            hp["max_depth"] = c1.slider(
+                                "Max Depth", 1, 20, 5,
+                                help="Higher = more complex, risk of overfitting",
+                            )
+                            hp["min_samples_split"] = c2.slider(
+                                "Min Samples Split", 2, 20, 5,
+                                help="Min samples needed to split a node",
+                            )
+                            hp["min_samples_leaf"] = c3.slider(
+                                "Min Samples Leaf", 1, 20, 2,
+                                help="Min samples at a leaf node",
+                            )
+                            st.caption("Tip: Max Depth 3–8 is usually best. Too high → overfitting.")
+ 
+                        elif model_name == "Random Forest":
+                            c1, c2, c3, c4 = st.columns(4)
+                            hp["n_estimators"] = c1.slider(
+                                "N Estimators", 50, 500, 150, step=50,
+                                help="More trees = better but slower",
+                            )
+                            hp["max_depth"] = c2.slider(
+                                "Max Depth", 1, 20, 7,
+                                help="Max depth of each tree",
+                            )
+                            hp["min_samples_split"] = c3.slider(
+                                "Min Samples Split", 2, 20, 5,
+                            )
+                            hp["min_samples_leaf"] = c4.slider(
+                                "Min Samples Leaf", 1, 20, 2,
+                            )
+                            st.caption("Tip: Start with 100–200 trees. Max Depth 5–10 works well.")
+ 
+                        elif model_name == "SVM":
+                            c1, c2, c3 = st.columns(3)
+                            hp["C"] = c1.select_slider(
+                                "C (Regularization)",
+                                options=[0.01, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0],
+                                value=1.0,
+                                help="Higher C = less regularization",
+                            )
+                            hp["kernel"] = c2.selectbox(
+                                "Kernel", ["rbf", "linear", "poly", "sigmoid"],
+                                help="rbf works best for most cases",
+                            )
+                            hp["gamma"] = c3.selectbox(
+                                "Gamma", ["scale", "auto"],
+                                help="scale = 1/(n_features * X.var())",
+                            )
+                            st.caption("Tip: rbf kernel with C=1.0 is a safe start.")
+ 
+                    else:
+                        if model_name == "Decision Tree":
+                            hp = {"max_depth": 5, "min_samples_split": 5, "min_samples_leaf": 2}
+                        elif model_name == "Random Forest":
+                            hp = {"n_estimators": 150, "max_depth": 7,
+                                  "min_samples_split": 5, "min_samples_leaf": 2}
+                        elif model_name == "SVM":
+                            hp = {"C": 1.0, "kernel": "rbf", "gamma": "scale"}
+ 
                 divider()
-                sec("5-Fold Cross-Validation")
-                cv_label = "Accuracy" if cv_metric == "accuracy" else "R²"
  
-                cv1, cv2, cv3 = st.columns(3)
-                cv1.metric(f"Mean {cv_label}",   round(cv_scores.mean(), 4))
-                cv2.metric(f"Std Dev",            round(cv_scores.std(),  4))
-                cv3.metric(f"Min / Max",
-                           f"{round(cv_scores.min(),3)} / {round(cv_scores.max(),3)}")
+                # ── 5. Train Button ──
+                sec("Train")
  
-                # small fold chart
-                fig, ax = plt.subplots(figsize=(5, 2.2))
-                fig.patch.set_facecolor("#0d1117")
-                ax.set_facecolor("#0d1117")
-                fold_colors = ["#3b82f6" if s >= cv_scores.mean() else "#334155"
-                               for s in cv_scores]
-                ax.bar(
-                    [f"Fold {i+1}" for i in range(len(cv_scores))],
-                    cv_scores,
-                    color=fold_colors, edgecolor="none",
-                )
-                ax.axhline(cv_scores.mean(), color="#f59e0b",
-                           linewidth=1.2, linestyle="--", label="Mean")
-                ax.set_ylabel(cv_label, color="#64748b", fontsize=7)
-                ax.tick_params(colors="#64748b", labelsize=7)
-                ax.legend(fontsize=7, labelcolor="#94a3b8",
-                          facecolor="#0d1117", edgecolor="#1e293b")
-                for s in ax.spines.values():
-                    s.set_visible(False)
-                ax.yaxis.grid(True, color="#151c28", linewidth=0.5)
-                plt.tight_layout()
-                st.pyplot(fig)
-                plt.close(fig)
+                # warn if not enough rows for split
+                min_rows_needed = max(10, int(1 / test_size) + 1)
+                if len(X) < min_rows_needed:
+                    banner(
+                        f"Not enough rows ({len(X)}) for a {int(test_size*100)}% test split — "
+                        f"need at least <strong>{min_rows_needed}</strong> rows.",
+                        "err",
+                    )
+                else:
+                    if st.button("▶  Train Model", key="train_btn"):
+                        X_s = X.copy()
+                        y_s = y.copy()
  
-            # ── Training summary ──
-            divider()
-            banner(
-                f"<strong>{mdl_name}</strong> trained successfully &nbsp;·&nbsp; "
-                f"⏱ {round(st.session_state['train_time'], 2)}s",
-                "ok",
-            )
+                        if len(X_s) > MAX_ROWS:
+                            X_s = X_s.sample(MAX_ROWS, random_state=42)
+                            y_s = y_s.loc[X_s.index]
  
-            # ── Download Model ──
-            divider()
-            sec("Download Model")
+                        with st.spinner("Training… please wait."):
+                            from sklearn.model_selection import train_test_split, cross_val_score
+                            from sklearn.preprocessing   import StandardScaler
+                            from sklearn.decomposition   import PCA
+                            import time
  
-            model_bundle = {
-                "model"   : st.session_state["trained_model"],
-                "scaler"  : st.session_state.get("scaler"),
-                "pca"     : st.session_state.get("pca"),
-                "features": st.session_state["trained_features"],
-                "target"  : st.session_state["trained_target"],
-                "task"    : st.session_state["trained_task"],
-                "params"  : st.session_state.get("trained_hp", {}),
-            }
-            buf = io.BytesIO()
-            pickle.dump(model_bundle, buf)
-            buf.seek(0)
+                            start = time.time()
  
-            dl1, dl2 = st.columns(2)
-            with dl1:
-                st.download_button(
-                    "⬇  Download Model (.pkl)",
-                    data=buf,
-                    file_name=f"{mdl_name.replace(' ', '_')}_model.pkl",
-                    mime="application/octet-stream",
-                    key="train_dl_model",
-                )
-            with dl2:
-                csv_out = st.session_state.df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "⬇  Download Dataset CSV",
-                    data=csv_out,
-                    file_name="final_dataset.csv",
-                    mime="text/csv",
-                    key="train_dl_csv",
-                )
+                            X_train, X_test, y_train, y_test = train_test_split(
+                                X_s, y_s, test_size=test_size, random_state=42
+                            )
+ 
+                            # scaling
+                            needs_scale = model_name in [
+                                "KNN", "SVM", "Linear Regression", "Logistic Regression"
+                            ]
+                            scaler = None
+                            if needs_scale or is_highdim:
+                                scaler  = StandardScaler()
+                                X_train = scaler.fit_transform(X_train)
+                                X_test  = scaler.transform(X_test)
+                            else:
+                                X_train = X_train.values
+                                X_test  = X_test.values
+ 
+                            # PCA
+                            pca         = None
+                            pca_n_after = None
+                            if is_highdim:
+                                pca         = PCA(n_components=0.90, random_state=42)
+                                X_train     = pca.fit_transform(X_train)
+                                X_test      = pca.transform(X_test)
+                                pca_n_after = X_train.shape[1]
+ 
+                            # model init
+                            if model_name == "Linear Regression":
+                                from sklearn.linear_model import LinearRegression
+                                model = LinearRegression()
+ 
+                            elif model_name == "Logistic Regression":
+                                from sklearn.linear_model import LogisticRegression
+                                model = LogisticRegression(max_iter=1000, C=1.0, solver="lbfgs")
+ 
+                            elif model_name == "KNN":
+                                from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+                                k = min(5, len(X_train))
+                                model = (
+                                    KNeighborsClassifier(n_neighbors=k, weights="distance")
+                                    if task_type == "Classification"
+                                    else KNeighborsRegressor(n_neighbors=k, weights="distance")
+                                )
+ 
+                            elif model_name == "SVM":
+                                from sklearn.svm import SVC, SVR
+                                model = (
+                                    SVC(kernel=hp["kernel"], C=hp["C"],
+                                        gamma=hp["gamma"], probability=True)
+                                    if task_type == "Classification"
+                                    else SVR(kernel=hp["kernel"], C=hp["C"], gamma=hp["gamma"])
+                                )
+ 
+                            elif model_name == "Decision Tree":
+                                from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+                                model = (
+                                    DecisionTreeClassifier(
+                                        max_depth=hp["max_depth"],
+                                        min_samples_split=hp["min_samples_split"],
+                                        min_samples_leaf=hp["min_samples_leaf"],
+                                        random_state=42,
+                                    )
+                                    if task_type == "Classification"
+                                    else DecisionTreeRegressor(
+                                        max_depth=hp["max_depth"],
+                                        min_samples_split=hp["min_samples_split"],
+                                        min_samples_leaf=hp["min_samples_leaf"],
+                                        random_state=42,
+                                    )
+                                )
+ 
+                            else:  # Random Forest
+                                from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+                                model = (
+                                    RandomForestClassifier(
+                                        n_estimators=hp.get("n_estimators", 150),
+                                        max_depth=hp.get("max_depth", 7),
+                                        min_samples_split=hp.get("min_samples_split", 5),
+                                        min_samples_leaf=hp.get("min_samples_leaf", 2),
+                                        random_state=42, n_jobs=-1,
+                                    )
+                                    if task_type == "Classification"
+                                    else RandomForestRegressor(
+                                        n_estimators=hp.get("n_estimators", 150),
+                                        max_depth=hp.get("max_depth", 7),
+                                        min_samples_split=hp.get("min_samples_split", 5),
+                                        min_samples_leaf=hp.get("min_samples_leaf", 2),
+                                        random_state=42, n_jobs=-1,
+                                    )
+                                )
+ 
+                            model.fit(X_train, y_train)
+                            preds = model.predict(X_test)
+ 
+                            # cross-val — need at least 5 samples per fold
+                            cv_folds   = min(5, len(X_train))
+                            cv_scoring = "accuracy" if task_type == "Classification" else "r2"
+                            cv_scores  = cross_val_score(
+                                model, X_train, y_train,
+                                cv=cv_folds, scoring=cv_scoring, n_jobs=-1,
+                            ) if cv_folds >= 2 else np.array([])
+ 
+                            elapsed = time.time() - start
+ 
+                        st.session_state.update({
+                            "trained_model"      : model,
+                            "trained_preds"      : preds.tolist(),
+                            "trained_y_test"     : y_test.tolist(),
+                            "trained_task"       : task_type,
+                            "trained_model_name" : model_name,
+                            "trained_target"     : target,
+                            "trained_features"   : X.columns.tolist(),
+                            "trained_pca_n"      : pca_n_after,
+                            "trained_hp"         : hp,
+                            "train_time"         : elapsed,
+                            "train_cv_scores"    : cv_scores.tolist(),
+                            "train_cv_metric"    : cv_scoring,
+                            "train_cv_folds"     : cv_folds,
+                            "scaler"             : scaler,
+                            "pca"                : pca,
+                        })
+ 
+                # ── 6. Results ──
+                if "trained_model" in st.session_state:
+                    preds      = np.array(st.session_state["trained_preds"])
+                    y_test_arr = np.array(st.session_state["trained_y_test"])
+                    task       = st.session_state["trained_task"]
+                    mdl_name   = st.session_state["trained_model_name"]
+                    pca_n      = st.session_state["trained_pca_n"]
+                    used_hp    = st.session_state.get("trained_hp", {})
+                    cv_scores  = np.array(st.session_state.get("train_cv_scores", []))
+                    cv_metric  = st.session_state.get("train_cv_metric", "")
+                    cv_folds   = st.session_state.get("train_cv_folds", 5)
+ 
+                    divider()
+                    sec(f"Results — {mdl_name}")
+ 
+                    if pca_n:
+                        banner(
+                            f"PCA applied → reduced to <strong>{pca_n}</strong> "
+                            f"components (90% variance retained).",
+                            "warn",
+                        )
+ 
+                    if used_hp:
+                        hp_str = " &nbsp;·&nbsp; ".join(
+                            [f'<span style="color:#e2e8f0;">{k}</span>: '
+                             f'<span style="color:#3b82f6;">{v}</span>'
+                             for k, v in used_hp.items()]
+                        )
+                        st.markdown(
+                            f'<div style="font-family:\'DM Mono\',monospace;font-size:0.68rem;'
+                            f'color:#64748b;margin-bottom:0.8rem;">Params — {hp_str}</div>',
+                            unsafe_allow_html=True,
+                        )
+ 
+                    # ── Metrics ──
+                    if task == "Regression":
+                        from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+                        r2   = r2_score(y_test_arr, preds)
+                        mse  = mean_squared_error(y_test_arr, preds)
+                        rmse = np.sqrt(mse)
+                        mae  = mean_absolute_error(y_test_arr, preds)
+ 
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("R² Score", round(r2,   4))
+                        m2.metric("MAE",      round(mae,  4))
+                        m3.metric("MSE",      round(mse,  4))
+                        m4.metric("RMSE",     round(rmse, 4))
+ 
+                        divider()
+                        sec("Actual vs Predicted")
+                        sample_n = min(200, len(y_test_arr))
+                        idx      = np.random.choice(len(y_test_arr), sample_n, replace=False)
+                        fig, ax  = plt.subplots(figsize=(7, 3.5))
+                        fig.patch.set_facecolor("#0d1117")
+                        ax.set_facecolor("#0d1117")
+                        ax.scatter(y_test_arr[idx], preds[idx],
+                                   color="#3b82f6", alpha=0.55, s=18, edgecolors="none")
+                        lims = [
+                            min(y_test_arr.min(), preds.min()),
+                            max(y_test_arr.max(), preds.max()),
+                        ]
+                        ax.plot(lims, lims, color="#f59e0b", linewidth=1.2,
+                                linestyle="--", label="Perfect fit")
+                        ax.set_xlabel("Actual",    color="#64748b", fontsize=8)
+                        ax.set_ylabel("Predicted", color="#64748b", fontsize=8)
+                        ax.tick_params(colors="#64748b", labelsize=7)
+                        ax.legend(fontsize=7, labelcolor="#94a3b8",
+                                  facecolor="#0d1117", edgecolor="#1e293b")
+                        for s in ax.spines.values():
+                            s.set_visible(False)
+                        ax.grid(True, color="#151c28", linewidth=0.5)
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        download_chart(fig, key="train_avp_download")
+                        plt.close(fig)
+ 
+                    else:
+                        from sklearn.metrics import (
+                            accuracy_score, confusion_matrix, classification_report
+                        )
+                        acc = accuracy_score(y_test_arr, preds)
+                        st.metric("Test Accuracy", f"{round(acc * 100, 2)}%")
+ 
+                        divider()
+                        sec("Classification Report")
+                        report    = classification_report(
+                            y_test_arr, preds, output_dict=True, zero_division=0
+                        )
+                        report_df = pd.DataFrame(report).transpose().round(3)
+                        row_h     = 35
+                        tbl_h     = min(500, 38 + len(report_df) * row_h)
+                        st.dataframe(report_df, use_container_width=True, height=tbl_h)
+ 
+                        divider()
+                        sec("Confusion Matrix")
+                        cm       = confusion_matrix(y_test_arr, preds)
+                        n_cls    = cm.shape[0]
+                        fig_size = max(3, min(7, n_cls * 1.2))
+                        fig, ax  = plt.subplots(figsize=(fig_size, fig_size))
+                        fig.patch.set_facecolor("#0d1117")
+                        ax.set_facecolor("#0d1117")
+                        sns.heatmap(
+                            cm, annot=True, fmt="d", cmap="Blues", ax=ax,
+                            linewidths=0.5, linecolor="#161b22",
+                            annot_kws={"size": 9},
+                        )
+                        ax.set_xlabel("Predicted", color="#64748b", fontsize=8)
+                        ax.set_ylabel("Actual",    color="#64748b", fontsize=8)
+                        ax.tick_params(colors="#64748b", labelsize=7)
+                        for s in ax.spines.values():
+                            s.set_visible(False)
+                        plt.tight_layout()
+                        _, mid, _ = st.columns([1, 2, 1])
+                        with mid:
+                            st.pyplot(fig)
+                            download_chart(fig, key="train_cm_download")
+                        plt.close(fig)
+ 
+                    # ── Cross-Validation ──
+                    if len(cv_scores) > 0:
+                        divider()
+                        sec(f"{cv_folds}-Fold Cross-Validation")
+                        cv_label = "Accuracy" if cv_metric == "accuracy" else "R²"
+ 
+                        cv1, cv2, cv3 = st.columns(3)
+                        cv1.metric(f"Mean {cv_label}", round(cv_scores.mean(), 4))
+                        cv2.metric("Std Dev",           round(cv_scores.std(),  4))
+                        cv3.metric("Min / Max",
+                                   f"{round(cv_scores.min(),3)} / {round(cv_scores.max(),3)}")
+ 
+                        fig, ax = plt.subplots(figsize=(5, 2.2))
+                        fig.patch.set_facecolor("#0d1117")
+                        ax.set_facecolor("#0d1117")
+                        fold_colors = [
+                            "#3b82f6" if s >= cv_scores.mean() else "#334155"
+                            for s in cv_scores
+                        ]
+                        ax.bar(
+                            [f"Fold {i+1}" for i in range(len(cv_scores))],
+                            cv_scores,
+                            color=fold_colors, edgecolor="none",
+                        )
+                        ax.axhline(cv_scores.mean(), color="#f59e0b",
+                                   linewidth=1.2, linestyle="--", label="Mean")
+                        ax.set_ylabel(cv_label, color="#64748b", fontsize=7)
+                        ax.tick_params(colors="#64748b", labelsize=7)
+                        ax.legend(fontsize=7, labelcolor="#94a3b8",
+                                  facecolor="#0d1117", edgecolor="#1e293b")
+                        for s in ax.spines.values():
+                            s.set_visible(False)
+                        ax.yaxis.grid(True, color="#151c28", linewidth=0.5)
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close(fig)
+ 
+                    # ── Summary ──
+                    divider()
+                    banner(
+                        f"<strong>{mdl_name}</strong> trained successfully "
+                        f"&nbsp;·&nbsp; ⏱ {round(st.session_state['train_time'], 2)}s",
+                        "ok",
+                    )
+ 
+                    # ── Download ──
+                    divider()
+                    sec("Download Model")
+ 
+                    model_bundle = {
+                        "model"   : st.session_state["trained_model"],
+                        "scaler"  : st.session_state.get("scaler"),
+                        "pca"     : st.session_state.get("pca"),
+                        "features": st.session_state["trained_features"],
+                        "target"  : st.session_state["trained_target"],
+                        "task"    : st.session_state["trained_task"],
+                        "params"  : st.session_state.get("trained_hp", {}),
+                    }
+                    buf = io.BytesIO()
+                    pickle.dump(model_bundle, buf)
+                    buf.seek(0)
+ 
+                    dl1, dl2 = st.columns(2)
+                    with dl1:
+                        st.download_button(
+                            "⬇  Download Model (.pkl)",
+                            data=buf,
+                            file_name=f"{mdl_name.replace(' ', '_')}_model.pkl",
+                            mime="application/octet-stream",
+                            key="train_dl_model",
+                        )
+                    with dl2:
+                        csv_out = st.session_state.df.to_csv(index=False).encode("utf-8")
+                        st.download_button(
+                            "⬇  Download Dataset CSV",
+                            data=csv_out,
+                            file_name="final_dataset.csv",
+                            mime="text/csv",
+                            key="train_dl_csv",
+                        )
