@@ -2,7 +2,7 @@
 
 > Upload a CSV. Clean it. Encode it. Find what matters. Train a model. Done.
 
-MLPredictor is a no-code machine learning web app built with Streamlit that takes you from raw data to a trained, downloadable ML model — all in one place, no coding required.
+MLPredictor is a no-code machine learning web app built with Streamlit that takes you from raw data to a trained, downloadable ML model — all in one place, no coding required. 
 
 ![App Screenshot](Screenshot.png)
 
@@ -17,7 +17,7 @@ Get an instant summary of your dataset — shape, data types, missing values, du
 Select any column and explore it visually. Numeric columns get a distribution chart + box plot. Categorical columns get a bar chart + pie chart — with skewness, mean, median, and more.
 
 ### 🧹 Fill Missing Values
-Handle missing data with Mean, Median, or Mode filling. Delete unwanted columns. Reset to original anytime.
+Handle missing data with Mean, Median, or Mode filling. Delete unwanted columns. Reset to original anytime.  
 
 ### 🔢 Encoding
 Convert categorical columns to numbers using Label Encoding, One Hot Encoding, or Manual (Ordinal) Encoding. Undo any step or reset the entire dataset.
