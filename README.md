@@ -1,6 +1,6 @@
-# 🚀 MLPredictor
+# 🚀 MLPredictor:
 
-> Upload a CSV. Clean it. Encode it. Find what matters. Train a model. Done.
+> Upload a CSV. Clean it. Encode it. Find what matters. Train a model. Done. 
 
 MLPredictor is a no-code machine learning web app built with Streamlit that takes you from raw data to a trained, downloadable ML model — all in one place, no coding required. 
 
