@@ -1,4 +1,4 @@
-# 🚀 MLPredictor:
+# 🚀 MLPredictor
 
 > Upload a CSV. Clean it. Encode it. Find what matters. Train a model. Done. 
 
